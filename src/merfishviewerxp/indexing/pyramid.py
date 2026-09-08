@@ -64,7 +64,14 @@ def build_pyramid(
         if chunks_this_level is None:
             targets = [(cr, cc) for cr in range(n_chunk_rows) for cc in range(n_chunk_cols)]
         else:
-            targets = sorted({(min(cr, n_chunk_rows - 1), min(cc, n_chunk_cols - 1)) for cr, cc in chunks_this_level})
+            # `chunks_this_level` is expressed in the *source* (current) level's
+            # chunk-index space. It must be rescaled into the destination
+            # level's chunk-index space -- via the same halving relationship
+            # as the pixel dimensions -- before use, not just clamped into
+            # range. Clamping alone (the original bug here) silently computes
+            # the wrong destination position for nearly every chunk.
+            rescaled = {(cr // downsample_factor, cc // downsample_factor) for cr, cc in chunks_this_level}
+            targets = sorted({(min(cr, n_chunk_rows - 1), min(cc, n_chunk_cols - 1)) for cr, cc in rescaled})
 
         for cr, cc in targets:
             row0, row1 = cr * chunk_size, min((cr + 1) * chunk_size, new_h)
@@ -79,7 +86,7 @@ def build_pyramid(
         h, w = new_h, new_w
         level_idx += 1
         if chunks_this_level is not None:
-            chunks_this_level = {(cr // downsample_factor, cc // downsample_factor) for cr, cc in targets}
+            chunks_this_level = set(targets)  # already rescaled into this (now-current) level's own index space
 
     logger.info("Built %d pyramid level(s) under %s (final shape %s)", len(created), out_dir, (z, h, w))
     return created

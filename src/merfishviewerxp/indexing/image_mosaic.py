@@ -91,6 +91,48 @@ def orient_image_array(arr: np.ndarray, *, flip_horizontal: bool, flip_vertical:
     return arr
 
 
+def _fov_pixel_extent(
+    fov, dataset: DatasetDescriptor, geometry: MosaicGeometry
+) -> tuple[int, int, int, int, int, int] | None:
+    """``(row0, col0, row0_clipped, col0_clipped, row1_clipped, col1_clipped)`` for
+    placing one FOV, or ``None`` if it falls entirely outside the mosaic bounds.
+    """
+    if fov.image_shape_zyx is None:
+        return None
+    _, h, w = fov.image_shape_zyx
+    if dataset.image_orientation_apply and dataset.microscope.transpose:
+        h, w = w, h
+    col0 = round((fov.position_x_um - geometry.origin_x_um) / geometry.pixel_size_um)
+    row0 = round((fov.position_y_um - geometry.origin_y_um) / geometry.pixel_size_um)
+    row0c, col0c = max(row0, 0), max(col0, 0)
+    row1c, col1c = min(row0 + h, geometry.height_px), min(col0 + w, geometry.width_px)
+    if row0c >= row1c or col0c >= col1c:
+        return None
+    return row0, col0, row0c, col0c, row1c, col1c
+
+
+def compute_touched_chunks(
+    dataset: DatasetDescriptor, channel_id: str, geometry: MosaicGeometry, *, chunk_size: int
+) -> set[tuple[int, int]]:
+    """Which level-0 chunks would receive data for this channel -- pure FOV
+    geometry, no image I/O. Used both to skip empty regions while building
+    the mosaic and to repair/rebuild pyramid levels from an already-built
+    level-0 array without re-reading any source TIFFs.
+    """
+    touched: set[tuple[int, int]] = set()
+    for fov in dataset.fovs:
+        if channel_id not in fov.image_paths:
+            continue
+        extent = _fov_pixel_extent(fov, dataset, geometry)
+        if extent is None:
+            continue
+        _, _, row0c, col0c, row1c, col1c = extent
+        for cr in range(row0c // chunk_size, (row1c - 1) // chunk_size + 1):
+            for cc in range(col0c // chunk_size, (col1c - 1) // chunk_size + 1):
+                touched.add((cr, cc))
+    return touched
+
+
 def _feather_alpha(height: int, width: int, crop_px: int) -> np.ndarray:
     if crop_px <= 0:
         return np.ones((height, width), dtype=np.float32)
@@ -136,10 +178,15 @@ def build_channel_mosaic(
     # rather than tiling the full bounding box, so the finalize pass below
     # only visits chunks that actually received data instead of the entire
     # (potentially mostly-empty) bounding-box grid.
-    touched_chunks: set[tuple[int, int]] = set()
+    touched_chunks = compute_touched_chunks(dataset, channel_id, geometry, chunk_size=chunk_size)
 
     fovs_with_images = [f for f in dataset.fovs if channel_id in f.image_paths and f.image_shape_zyx is not None]
     for i, fov in enumerate(fovs_with_images):
+        extent = _fov_pixel_extent(fov, dataset, geometry)
+        if extent is None:
+            continue
+        row0, col0, row0c, col0c, row1c, col1c = extent
+
         arr = tifffile.imread(fov.image_paths[channel_id]).astype(np.float32)
         if arr.ndim == 2:
             arr = arr[None, :, :]
@@ -150,14 +197,7 @@ def build_channel_mosaic(
                 flip_vertical=dataset.microscope.flip_vertical,
                 transpose=dataset.microscope.transpose,
             )
-
         _, h, w = arr.shape
-        col0 = round((fov.position_x_um - geometry.origin_x_um) / geometry.pixel_size_um)
-        row0 = round((fov.position_y_um - geometry.origin_y_um) / geometry.pixel_size_um)
-        row0c, col0c = max(row0, 0), max(col0, 0)
-        row1c, col1c = min(row0 + h, geometry.height_px), min(col0 + w, geometry.width_px)
-        if row0c >= row1c or col0c >= col1c:
-            continue
         arr_crop = arr[:, row0c - row0 : row1c - row0, col0c - col0 : col1c - col0]
 
         if weighted:
@@ -178,10 +218,6 @@ def build_channel_mosaic(
             new_value = np.where(write_mask[None, :, :], arr_crop, existing_value)
             value_arr[:, row0c:row1c, col0c:col1c] = new_value
             weight_arr[row0c:row1c, col0c:col1c] = np.maximum(existing_covered, write_mask.astype(np.uint8))
-
-        for cr in range(row0c // chunk_size, (row1c - 1) // chunk_size + 1):
-            for cc in range(col0c // chunk_size, (col1c - 1) // chunk_size + 1):
-                touched_chunks.add((cr, cc))
 
         if progress_callback:
             progress_callback(i + 1, len(fovs_with_images))
