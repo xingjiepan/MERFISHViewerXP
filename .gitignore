@@ -216,3 +216,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# MERFISHViewerXP disposable cache (built by `merfishviewerxp index`/`view`)
+merfishviewerxp_cache/

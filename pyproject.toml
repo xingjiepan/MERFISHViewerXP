@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "merfishviewerxp"
+version = "0.1.0"
+description = "Interactive Google-Earth-like viewer for MERFISH/MERlin decoding results"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+    "numpy",
+    "pandas",
+    "pyarrow",
+    "zarr<3",
+    "dask[array]",
+    "scipy",
+    "scikit-image",
+    "tifffile",
+    "pydantic>=2",
+    "pyyaml",
+    "typer>=0.9",
+    "napari",
+    "PyQt6",
+    "superqt",
+]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-qt"]
+dev = ["ruff", "mypy"]
+
+[project.scripts]
+merfishviewerxp = "merfishviewerxp.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "RUF"]
+ignore = [
+    "B008",  # typer.Option()/typer.Argument() as defaults is the required pattern for typer CLIs
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["RUF059"]  # unused unpacked fixture values (kept for readability of test setup)
