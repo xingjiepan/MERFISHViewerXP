@@ -38,6 +38,7 @@ class ViewportQueryRunner:
         include_blanks: bool,
         max_visible_points: int,
         z_range_um: tuple[float, float] | None = None,
+        apply_lod_sampling: bool = True,
     ) -> None:
         self._generation += 1
         generation = self._generation
@@ -51,6 +52,7 @@ class ViewportQueryRunner:
                 include_blanks=include_blanks,
                 max_visible_points=max_visible_points,
                 z_range_um=z_range_um,
+                apply_lod_sampling=apply_lod_sampling,
             )
             return table, lod_info, generation
 

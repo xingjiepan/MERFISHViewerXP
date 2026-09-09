@@ -27,7 +27,11 @@ class ViewerState(BaseModel):
     z_range: tuple[int, int] = (0, 0)
 
     transcripts_visible: bool = True
-    active_gene_ids: list[int] = Field(default_factory=list)
+    # Each codebook gets its own gene selection, decoded-spot symbol, and
+    # visibility -- a dataset with one codebook has one entry in each dict.
+    active_gene_ids_by_codebook: dict[str, list[int]] = Field(default_factory=dict)
+    codebook_symbols: dict[str, str] = Field(default_factory=dict)
+    codebook_visible: dict[str, bool] = Field(default_factory=dict)
     include_blanks: bool = False
     point_size: float = 4.0
     point_opacity: float = 0.9
@@ -39,11 +43,20 @@ class ViewerState(BaseModel):
 
     viewport_bounds_um: tuple[float, float, float, float] | None = None
 
+    def all_active_gene_ids(self) -> set[int]:
+        ids: set[int] = set()
+        for codebook_ids in self.active_gene_ids_by_codebook.values():
+            ids.update(codebook_ids)
+        return ids
+
     def settings_subset(self) -> dict:
         """The part of state that should persist across sessions (spec 14.3)."""
         return {
-            "active_gene_ids": self.active_gene_ids,
+            "active_gene_ids_by_codebook": self.active_gene_ids_by_codebook,
+            "codebook_symbols": self.codebook_symbols,
+            "codebook_visible": self.codebook_visible,
             "include_blanks": self.include_blanks,
+            "lod_mode": self.lod_mode,
             "point_size": self.point_size,
             "point_opacity": self.point_opacity,
             "image_visibility": self.image_visibility,
@@ -74,8 +87,14 @@ class ViewerState(BaseModel):
         tmp.replace(path)
 
     @classmethod
-    def load_or_default(cls, path: Path, *, dataset_id: str, cache_path: Path, all_gene_ids: list[int]) -> ViewerState:
-        state = cls(dataset_id=dataset_id, cache_path=str(cache_path), active_gene_ids=list(all_gene_ids))
+    def load_or_default(
+        cls, path: Path, *, dataset_id: str, cache_path: Path, gene_ids_by_codebook: dict[str, list[int]]
+    ) -> ViewerState:
+        state = cls(
+            dataset_id=dataset_id,
+            cache_path=str(cache_path),
+            active_gene_ids_by_codebook={cb: list(ids) for cb, ids in gene_ids_by_codebook.items()},
+        )
         if path.is_file():
             try:
                 saved = json.loads(path.read_text())

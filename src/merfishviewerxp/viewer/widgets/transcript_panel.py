@@ -13,6 +13,7 @@ class TranscriptPanel(QGroupBox):
         initial_point_size: float,
         initial_point_opacity: float,
         initial_include_blanks: bool,
+        initial_display_mode: str = "auto",
         on_visible_changed: Callable[[bool], None],
         on_point_size_changed: Callable[[float], None],
         on_point_opacity_changed: Callable[[float], None],
@@ -28,10 +29,13 @@ class TranscriptPanel(QGroupBox):
         self.visible_checkbox.toggled.connect(on_visible_changed)
         layout.addRow(self.visible_checkbox)
 
+        # Internally scaled by 10x so the slider (integer-only) can reach a
+        # minimum point size of 0.1 instead of 1.
+        self._size_scale = 10
         self.size_slider = QSlider(Qt.Orientation.Horizontal)
-        self.size_slider.setRange(1, 50)
-        self.size_slider.setValue(int(initial_point_size))
-        self.size_slider.valueChanged.connect(lambda v: on_point_size_changed(float(v)))
+        self.size_slider.setRange(1, 50 * self._size_scale)
+        self.size_slider.setValue(round(initial_point_size * self._size_scale))
+        self.size_slider.valueChanged.connect(lambda v: on_point_size_changed(v / self._size_scale))
         layout.addRow("Point size", self.size_slider)
 
         self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
@@ -46,7 +50,14 @@ class TranscriptPanel(QGroupBox):
         layout.addRow(self.include_blanks_checkbox)
 
         self.display_mode_combo = QComboBox()
-        self.display_mode_combo.addItems(["auto", "points"])
+        self.display_mode_combo.addItems(["auto", "show_all"])
+        self.display_mode_combo.setCurrentText(initial_display_mode)
+        self.display_mode_combo.setToolTip(
+            "auto: cap the number of transcripts drawn for performance (deterministic sampling "
+            "when a viewport has more than the limit).\n"
+            "show_all: never sample -- always draw every decoded transcript in view, including "
+            "when zoomed out over a large area. Can be slow for very large viewports."
+        )
         self.display_mode_combo.currentTextChanged.connect(on_display_mode_changed)
         layout.addRow("Display mode", self.display_mode_combo)
 

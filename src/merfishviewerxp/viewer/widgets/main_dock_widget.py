@@ -22,11 +22,14 @@ class MainDockWidget(QScrollArea):
         cache_status: str,
         channels: list[str],
         z_count: int,
-        genes: pd.DataFrame,
-        initial_active_gene_ids: set[int],
+        genes_by_codebook: dict[str, pd.DataFrame],
+        initial_active_gene_ids_by_codebook: dict[str, set[int]],
+        initial_symbols_by_codebook: dict[str, str],
+        initial_visible_by_codebook: dict[str, bool],
         initial_point_size: float,
         initial_point_opacity: float,
         initial_include_blanks: bool,
+        initial_display_mode: str,
         max_fov_id: int,
         callbacks: dict[str, Callable],
         parent=None,
@@ -61,6 +64,7 @@ class MainDockWidget(QScrollArea):
             initial_point_size=initial_point_size,
             initial_point_opacity=initial_point_opacity,
             initial_include_blanks=initial_include_blanks,
+            initial_display_mode=initial_display_mode,
             on_visible_changed=callbacks["on_transcripts_visible_changed"],
             on_point_size_changed=callbacks["on_point_size_changed"],
             on_point_opacity_changed=callbacks["on_point_opacity_changed"],
@@ -69,12 +73,20 @@ class MainDockWidget(QScrollArea):
         )
         layout.addWidget(self.transcript_panel)
 
-        self.gene_panel = GenePanel(
-            genes=genes,
-            initial_active_gene_ids=initial_active_gene_ids,
-            on_selection_changed=callbacks["on_gene_selection_changed"],
-        )
-        layout.addWidget(self.gene_panel)
+        self.codebook_panels: dict[str, GenePanel] = {}
+        for codebook_id in sorted(genes_by_codebook):
+            panel = GenePanel(
+                codebook_id=codebook_id,
+                genes=genes_by_codebook[codebook_id],
+                initial_active_gene_ids=initial_active_gene_ids_by_codebook.get(codebook_id, set()),
+                initial_symbol=initial_symbols_by_codebook.get(codebook_id, "disc"),
+                initial_visible=initial_visible_by_codebook.get(codebook_id, True),
+                on_selection_changed=callbacks["on_gene_selection_changed"],
+                on_symbol_changed=callbacks["on_codebook_symbol_changed"],
+                on_visible_changed=callbacks["on_codebook_visible_changed"],
+            )
+            self.codebook_panels[codebook_id] = panel
+            layout.addWidget(panel)
 
         self.qc_panel = QCPanel(
             max_fov_id=max_fov_id,
