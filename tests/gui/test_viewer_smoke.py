@@ -15,8 +15,7 @@ from merfishviewerxp.viewer.app import MerfishViewerXPApp
 # double as regression coverage for per-codebook panels/layers/symbols.
 
 
-@pytest.fixture
-def app_instance(tmp_path, qtbot):
+def _build_app(tmp_path, qtbot):
     root = tmp_path / "experiment"
     build_synthetic_dataset(root)
     dataset = MerfishDataset.open(root)
@@ -27,7 +26,39 @@ def app_instance(tmp_path, qtbot):
     viewer = napari.Viewer(show=False)
     app = MerfishViewerXPApp(indexed, AppConfig(), viewer=viewer)
     qtbot.addWidget(app.dock_widget)
+    return app, viewer
+
+
+def _silence_late_query_results(app) -> None:
+    # A background query worker started just before a test ends can still be
+    # running when the test's widgets get torn down; if its result callback
+    # fires afterwards it mutates deleted Qt objects and crashes teardown (or
+    # even a later test's setup). Swallow anything that arrives after we're
+    # done rather than trying to guarantee every test waits it out.
+    app.query_runner.on_result = lambda *a, **k: None
+    app.query_runner.on_error = lambda *a, **k: None
+
+
+@pytest.fixture
+def app_instance(tmp_path, qtbot):
+    app, viewer = _build_app(tmp_path, qtbot)
+    # Transcripts start hidden on every launch (see
+    # test_transcripts_hidden_by_default_at_launch); most of these smoke
+    # tests exercise transcript behavior, so opt back in here rather than
+    # in every individual test.
+    app.dock_widget.transcript_panel.visible_checkbox.setChecked(True)
+    qtbot.waitUntil(lambda: sum(layer.data.shape[0] for layer in app.transcript_layers.values()) > 0, timeout=5000)
     yield app, qtbot
+    _silence_late_query_results(app)
+    viewer.close()
+
+
+@pytest.fixture
+def hidden_app_instance(tmp_path, qtbot):
+    """An app instance left in its real post-launch state: nothing visible."""
+    app, viewer = _build_app(tmp_path, qtbot)
+    yield app, qtbot
+    _silence_late_query_results(app)
     viewer.close()
 
 
@@ -294,6 +325,75 @@ def test_hover_over_spot_shows_gene_name_tooltip(app_instance, monkeypatch):
 
     app._on_mouse_move(app.viewer, FakeEventAway())
     assert shown.get("hidden") is True
+
+
+def test_transcripts_hidden_by_default_at_launch(hidden_app_instance):
+    app, qtbot = hidden_app_instance
+    assert app.state.transcripts_visible is False
+    assert all(v is False for v in app.state.codebook_visible.values())
+    assert app.dock_widget.transcript_panel.visible_checkbox.isChecked() is False
+    for panel in app.dock_widget.codebook_panels.values():
+        assert panel.visible_checkbox.isChecked() is False
+    assert all(not layer.visible for layer in app.transcript_layers.values())
+    assert _total_points(app) == 0
+
+
+def test_transcripts_hidden_by_default_even_if_previously_persisted_visible(tmp_path, qtbot):
+    """A stale settings.json from an older session (or a killed test run)
+    must never be able to make transcripts start visible -- that's exactly
+    the "stuck displaying too many points" scenario this default guards
+    against."""
+    import json
+
+    root = tmp_path / "experiment"
+    build_synthetic_dataset(root)
+    dataset = MerfishDataset.open(root)
+    cache_dir = root / "merfishviewerxp_cache"
+    index_dataset(dataset, cache_dir=cache_dir, config=AppConfig())
+    indexed = IndexedDataset.open(cache_dir)
+
+    settings_path = indexed.cache.settings_path
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(
+        json.dumps({"transcripts_visible": True, "codebook_visible": {"CB0": True, "CB1": True}})
+    )
+
+    viewer = napari.Viewer(show=False)
+    app = MerfishViewerXPApp(indexed, AppConfig(), viewer=viewer)
+    qtbot.addWidget(app.dock_widget)
+
+    assert app.state.transcripts_visible is False
+    assert all(v is False for v in app.state.codebook_visible.values())
+    assert all(not layer.visible for layer in app.transcript_layers.values())
+    assert _total_points(app) == 0
+
+
+def test_no_query_fires_at_startup_while_transcripts_hidden(tmp_path, qtbot, monkeypatch):
+    from merfishviewerxp.viewer.workers import ViewportQueryRunner
+
+    calls = []
+    monkeypatch.setattr(ViewportQueryRunner, "request", lambda self, **kwargs: calls.append(kwargs))
+
+    app, viewer = _build_app(tmp_path, qtbot)
+
+    assert calls == []
+
+
+def test_turning_on_codebook_visibility_triggers_a_query(hidden_app_instance):
+    """A codebook layer may never have been populated (the initial query is
+    skipped entirely while nothing is visible), so making it visible must
+    fetch fresh data -- even though the query itself covers every active
+    codebook's genes, not just the one being toggled (see
+    `_request_viewport_query`/`_apply_query_result`), so CB1's layer also
+    ends up populated. Visibility, not data, is what stays independent."""
+    app, qtbot = hidden_app_instance
+    assert _total_points(app) == 0
+
+    app.dock_widget.codebook_panels["CB0"].visible_checkbox.setChecked(True)
+
+    qtbot.waitUntil(lambda: app.transcript_layers["CB0"].data.shape[0] > 0, timeout=5000)
+    assert app.transcript_layers["CB0"].visible is True
+    assert app.transcript_layers["CB1"].visible is False
 
 
 def test_hover_ignores_hidden_codebook_layer(app_instance, monkeypatch):

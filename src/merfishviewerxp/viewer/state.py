@@ -26,7 +26,11 @@ class ViewerState(BaseModel):
     z_index: int = 0
     z_range: tuple[int, int] = (0, 0)
 
-    transcripts_visible: bool = True
+    # Deliberately not persisted (see settings_subset): every session starts
+    # with transcripts hidden, so a zoomed-out camera position or "show_all"
+    # LOD mode left on from a previous session can't make the first launch
+    # try to render a huge number of points before the user can react.
+    transcripts_visible: bool = False
     # Each codebook gets its own gene selection, decoded-spot symbol, and
     # visibility -- a dataset with one codebook has one entry in each dict.
     active_gene_ids_by_codebook: dict[str, list[int]] = Field(default_factory=dict)
@@ -50,11 +54,15 @@ class ViewerState(BaseModel):
         return ids
 
     def settings_subset(self) -> dict:
-        """The part of state that should persist across sessions (spec 14.3)."""
+        """The part of state that should persist across sessions (spec 14.3).
+
+        `transcripts_visible` and `codebook_visible` are deliberately
+        excluded: transcript visibility always starts off at launch (see
+        the field docstring above), so persisting it would be misleading.
+        """
         return {
             "active_gene_ids_by_codebook": self.active_gene_ids_by_codebook,
             "codebook_symbols": self.codebook_symbols,
-            "codebook_visible": self.codebook_visible,
             "include_blanks": self.include_blanks,
             "lod_mode": self.lod_mode,
             "point_size": self.point_size,

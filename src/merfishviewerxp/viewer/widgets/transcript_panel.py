@@ -14,6 +14,7 @@ class TranscriptPanel(QGroupBox):
         initial_point_opacity: float,
         initial_include_blanks: bool,
         initial_display_mode: str = "auto",
+        initial_visible: bool = False,
         on_visible_changed: Callable[[bool], None],
         on_point_size_changed: Callable[[float], None],
         on_point_opacity_changed: Callable[[float], None],
@@ -25,7 +26,7 @@ class TranscriptPanel(QGroupBox):
         layout = QFormLayout()
 
         self.visible_checkbox = QCheckBox("Visible")
-        self.visible_checkbox.setChecked(True)
+        self.visible_checkbox.setChecked(initial_visible)
         self.visible_checkbox.toggled.connect(on_visible_changed)
         layout.addRow(self.visible_checkbox)
 

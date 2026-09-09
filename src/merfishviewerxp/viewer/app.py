@@ -47,7 +47,18 @@ class MerfishViewerXPApp:
         for i, codebook_id in enumerate(sorted(gene_ids_by_codebook)):
             self.state.active_gene_ids_by_codebook.setdefault(codebook_id, list(gene_ids_by_codebook[codebook_id]))
             self.state.codebook_symbols.setdefault(codebook_id, AVAILABLE_SYMBOLS[i % len(AVAILABLE_SYMBOLS)])
-            self.state.codebook_visible.setdefault(codebook_id, True)
+
+        # Transcript visibility is intentionally never restored from a
+        # previous session (and never persisted, see ViewerState.settings_subset):
+        # starting with a zoomed-out camera position -- or "show_all" LOD mode
+        # left on from last time -- combined with transcripts already visible
+        # can make the very first redraw try to place a huge number of points
+        # before the user has a chance to navigate or adjust anything. Every
+        # session starts with transcripts hidden; showing them is an explicit
+        # opt-in each time.
+        self.state.transcripts_visible = False
+        for codebook_id in gene_ids_by_codebook:
+            self.state.codebook_visible[codebook_id] = False
 
         self.image_layers: dict[str, napari.layers.Image] = {}
         self.transcript_layers: dict[str, napari.layers.Points] = {}
@@ -85,6 +96,7 @@ class MerfishViewerXPApp:
             initial_point_opacity=self.state.point_opacity,
             initial_include_blanks=self.state.include_blanks,
             initial_display_mode=self.state.lod_mode,
+            initial_transcripts_visible=self.state.transcripts_visible,
             max_fov_id=int(indexed.fovs()["fov_id"].max()) if len(indexed.fovs()) else 0,
             callbacks=self._build_callbacks(),
         )
@@ -138,7 +150,7 @@ class MerfishViewerXPApp:
                 name=f"Decoded transcripts ({codebook_id})",
                 size=self.state.point_size,
                 opacity=self.state.point_opacity,
-                visible=self.state.codebook_visible.get(codebook_id, True),
+                visible=self.state.codebook_visible.get(codebook_id, False),
                 symbol=self.state.codebook_symbols.get(codebook_id, "disc"),
                 border_width=0,
             )
@@ -153,6 +165,11 @@ class MerfishViewerXPApp:
         self._debounce_timer.start()
 
     def _request_viewport_query(self) -> None:
+        if not any(self.state.codebook_visible.values()):
+            # Nothing would be shown anyway -- skip the (potentially slow,
+            # for a large viewport) query and layer update entirely rather
+            # than doing the work just to populate invisible layers.
+            return
         active = self.state.all_active_gene_ids()
         gene_ids = None if active == self._all_gene_ids else list(active)
         self.query_runner.request(
@@ -373,6 +390,11 @@ class MerfishViewerXPApp:
         self.state.codebook_visible[codebook_id] = visible
         self.transcript_layers[codebook_id].visible = visible
         self.state.save(self.indexed.cache.settings_path)
+        if visible:
+            # This layer may never have been populated (e.g. transcripts
+            # start hidden at launch and the initial query is skipped
+            # entirely while nothing is visible), so fetch fresh data now.
+            self._request_viewport_query()
 
     def _on_show_fov_boundaries_changed(self, visible: bool) -> None:
         self.state.show_fov_boundaries = visible
