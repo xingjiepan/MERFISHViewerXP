@@ -113,7 +113,7 @@ def _build_segmentation(
         if done % 50 == 0 or done == total:
             report("segmentation", f"{done}/{total} FOV masks placed")
 
-    geometry, touched_chunks, n_placed = segmentation_mod.build_boundary_mosaic(
+    result = segmentation_mod.build_boundary_mosaic(
         dataset, level0_out_path=level0_path, chunk_size=config.images.chunk_size, progress_callback=seg_progress
     )
     if build_pyramid_levels:
@@ -122,16 +122,23 @@ def _build_segmentation(
             level0_path,
             tmp_seg / segmentation_mod.BOUNDARY_ARRAY_NAME,
             chunk_size=config.images.chunk_size,
-            active_chunks=touched_chunks,
+            active_chunks=result.touched_chunks,
             reduction="max",
         )
+    geometry = result.geometry
     metadata = {
         segmentation_mod.BOUNDARY_ARRAY_NAME: {
+            "format_version": segmentation_mod.SEGMENTATION_FORMAT_VERSION,
             "origin_world_um": [geometry.origin_x_um, geometry.origin_y_um],
             "pixel_size_um": [geometry.pixel_size_um, geometry.pixel_size_um],
             "shape_yx": [geometry.height_px, geometry.width_px],
             "z_count": geometry.z_count,
-            "n_fovs": n_placed,
+            "n_fovs": result.n_fovs,
+            "n_cell_ids": result.n_cell_ids,
+            "cell_id_ranges": [
+                {"fov_id": fov_id, "offset": offset, "max_label": max_label}
+                for fov_id, offset, max_label in result.cell_id_ranges
+            ],
         }
     }
     (tmp_seg / "mosaic_metadata.json").write_text(json.dumps(metadata, indent=2))
@@ -269,9 +276,12 @@ def index_dataset(
         components_built["images"] = True
         report("images", "done")
 
+    segmentation_format_version = segmentation_mod.SEGMENTATION_FORMAT_VERSION
     if build_segmentation and decision.rebuild_segmentation:
         _build_segmentation(dataset, cache=cache, config=config, build_pyramid_levels=build_pyramid_levels, report=report)
         components_built["segmentation"] = cache.segmentation_dir.is_dir()
+    elif old_manifest is not None:
+        segmentation_format_version = old_manifest.segmentation_format_version
 
     _write_fov_table(dataset, cache.fovs_path)
     save_dataset_json(dataset, cache.dataset_json_path)
@@ -282,6 +292,7 @@ def index_dataset(
         indexing_config=config.model_dump(),
         now_iso=now,
         components_built=components_built,
+        segmentation_format_version=segmentation_format_version,
     )
     if old_manifest is not None:
         manifest.created_at = old_manifest.created_at

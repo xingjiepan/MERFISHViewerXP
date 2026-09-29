@@ -11,6 +11,18 @@
   changing, or removing masks rebuilds only the boundaries. Existing caches
   and manifests stay valid.
 - CLI: `--no-segmentation` for `index` and `view`.
+- Per-cell boundary colors: boundaries now store dataset-wide cell ids
+  (uint32, cache format 2; format-1 caches rebuild only the boundaries).
+  New controls set the boundary color for all cells, and color individual
+  cells by clicking them with a chosen highlight color (click again to
+  restore; "Clear cell colors" resets all). Colors persist in
+  `settings.json` and are dropped if the masks change.
+- Fix: changing the z mode or recoloring cells no longer replaces image
+  layers' data. napari reset the layer to its coarsest level while keeping
+  the zoomed-in region, slicing an empty tile that some OpenGL drivers reject
+  (`GLError: invalid value` in `glTexSubImage2D`). Layers now read the z mode
+  and cell colors from shared view settings on every tile fetch and are
+  refreshed in place.
 - Tests: exit the pytest process with its own status once reporting is done
   when Qt was loaded, avoiding an intermittent PyQt6 segfault in its
   interpreter-exit cleanup after all tests have passed.

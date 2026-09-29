@@ -34,9 +34,7 @@ class MainDockWidget(QScrollArea):
         initial_transcripts_visible: bool,
         max_fov_id: int,
         callbacks: dict[str, Callable],
-        cell_boundaries_available: bool = False,
-        initial_show_cell_boundaries: bool = False,
-        initial_cell_boundary_opacity: float = 1.0,
+        cell_boundary_options: dict | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -62,11 +60,8 @@ class MainDockWidget(QScrollArea):
             on_z_mode_changed=callbacks["on_z_mode_changed"],
             on_z_index_changed=callbacks["on_z_index_changed"],
             on_z_range_changed=callbacks["on_z_range_changed"],
-            cell_boundaries_available=cell_boundaries_available,
-            initial_show_cell_boundaries=initial_show_cell_boundaries,
-            initial_cell_boundary_opacity=initial_cell_boundary_opacity,
-            on_cell_boundaries_visible_changed=callbacks.get("on_cell_boundaries_visible_changed"),
-            on_cell_boundary_opacity_changed=callbacks.get("on_cell_boundary_opacity_changed"),
+            cell_boundaries_available=cell_boundary_options is not None,
+            cell_boundary_options=cell_boundary_options,
         )
         layout.addWidget(self.image_panel)
 

@@ -123,6 +123,18 @@ def test_positions_change_also_rebuilds_segmentation(tmp_path):
     assert decision.rebuild_segmentation
 
 
+def test_old_boundary_format_rebuilds_only_segmentation(tmp_path):
+    root = tmp_path / "exp"
+    build_synthetic_dataset(root, with_masks=True)
+    manifest = build_manifest(
+        _discover(root), indexing_config={}, now_iso="t", components_built=ALL_BUILT, segmentation_format_version=1
+    )
+    decision = decide_invalidation(manifest, compute_source_fingerprint(_discover(root)))
+    assert decision.rebuild_segmentation
+    assert not (decision.rebuild_images or decision.rebuild_spots or decision.rebuild_genes)
+    assert any("format changed" in r for r in decision.reasons)
+
+
 def test_dataset_without_masks_never_requests_segmentation(tmp_path):
     root = tmp_path / "exp"
     build_synthetic_dataset(root)

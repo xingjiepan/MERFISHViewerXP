@@ -51,13 +51,30 @@ masks selectively invalidate only the affected components.
 If `CellPoseSegment/images` contains per-FOV label masks
 (`segmented_mask<fov>.tif`), indexing also builds a cell-boundary overlay:
 the inner edge of every segmented cell, computed per z-plane and placed on
-the same global grid as the stain images. Toggle it under **Images → Cell
-boundaries** in the dock widget (off by default; the choice is remembered).
-It follows the image z mode (single plane or max projection). Where FOVs
-overlap, boundaries from both FOVs are shown. Masks added to an
-already-indexed experiment only trigger the boundary build, not a rebuild of
-the stain mosaics. Each mask must have the same (z, y, x) shape as its FOV's
-stain images; pass `--no-segmentation` to skip the overlay.
+the same global grid as the stain images. Each boundary pixel stores a
+dataset-wide cell id (the FOV's id offset plus the cell's label in that FOV's
+mask). Toggle the overlay under **Images → Cell boundaries** in the dock
+widget (off by default; the choice is remembered). It follows the image z
+mode (single plane or max projection). Where FOVs overlap, boundaries from
+both FOVs are shown. Masks added to an already-indexed experiment only
+trigger the boundary build, not a rebuild of the stain mosaics. Each mask
+must have the same (z, y, x) shape as its FOV's stain images; pass
+`--no-segmentation` to skip the overlay.
+
+Boundary colors, in the same panel:
+
+- **Boundary color** sets the color of every cell's boundary.
+- **Highlight** picks a color, and **Click cells to color** turns on
+  per-cell coloring: click a cell to give its boundary the highlight color,
+  click it again to restore the boundary color. A click selects the cell
+  whose edge is nearest (within 15 µm), in the currently displayed z plane
+  or projection; dragging still pans. A notification reports the cell's id,
+  FOV, and mask label.
+- **Clear cell colors** restores every cell.
+
+Colors are saved in the cache's `settings.json` and restored next session.
+Per-cell colors are dropped if the segmentation masks change, since cell ids
+are then no longer guaranteed to refer to the same cells.
 
 ## Coordinate correctness
 

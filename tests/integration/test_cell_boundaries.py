@@ -56,12 +56,12 @@ def test_boundary_mosaic_aligns_with_the_image_mosaic(indexed_with_masks):
     assert meta["n_fovs"] == 4
 
     level0 = indexed.cell_boundary_pyramid()[0]
-    assert level0.dtype == np.uint8
+    assert level0.dtype == np.uint32
     image_level0 = indexed.image_pyramid("nucleus")[0]
     for fov_id, (x_um, y_um) in info["expected_marker_world_um"].items():
         row, col = _mosaic_pixel(indexed, meta, x_um, y_um)
         # the marker pixel is the cell's corner: a boundary, at the same place as the bright image marker
-        assert level0[0, row, col] == 1, f"FOV {fov_id}: expected a boundary at mosaic pixel ({row},{col})"
+        assert level0[0, row, col] > 0, f"FOV {fov_id}: expected a boundary at mosaic pixel ({row},{col})"
         assert image_level0[0, row, col] > 500.0
     for fov_id, (x_um, y_um) in info["expected_cell_interior_world_um"].items():
         row, col = _mosaic_pixel(indexed, meta, x_um, y_um)
@@ -72,7 +72,45 @@ def test_boundary_pyramid_levels_are_readable(indexed_with_masks):
     indexed, _, _ = indexed_with_masks
     levels = indexed.cell_boundary_pyramid()
     assert levels
-    assert all(level.dtype == np.uint8 and level[:].max() <= 1 for level in levels)
+    n_cell_ids = indexed.cell_boundary_metadata()["n_cell_ids"]
+    assert all(level.dtype == np.uint32 and level[:].max() <= n_cell_ids for level in levels)
+
+
+def test_each_fovs_cell_gets_its_own_id_that_maps_back_to_its_mask(indexed_with_masks):
+    indexed, _, info = indexed_with_masks
+    meta = indexed.cell_boundary_metadata()
+    assert meta["format_version"] == 2
+    assert meta["n_cell_ids"] == 4  # one cell (label 1) per FOV
+    level0 = indexed.cell_boundary_pyramid()[0]
+
+    ids_by_fov = {}
+    for fov_id, (x_um, y_um) in info["expected_marker_world_um"].items():
+        row, col = _mosaic_pixel(indexed, meta, x_um, y_um)
+        ids_by_fov[fov_id] = int(level0[0, row, col])
+    assert len(set(ids_by_fov.values())) == 4
+    for fov_id, cell_id in ids_by_fov.items():
+        assert indexed.cell_id_source(cell_id) == (fov_id, 1)
+    assert indexed.cell_id_source(0) is None
+    assert indexed.cell_id_source(999) is None
+
+
+def test_boundaries_in_the_previous_format_are_rebuilt_once(tmp_path):
+    root = tmp_path / "experiment"
+    build_synthetic_dataset(root, with_masks=True)
+    cache_dir = root / "merfishviewerxp_cache"
+    manifest = index_dataset(MerfishDataset.open(root), cache_dir=cache_dir, config=AppConfig())
+
+    # simulate a cache written by the first (uint8, format 1) boundary implementation
+    manifest.segmentation_format_version = 1
+    (cache_dir / "manifest.json").write_text(manifest.model_dump_json())
+    images_zarray = cache_dir / "images.zarr" / "nucleus" / "0" / ".zarray"
+    images_mtime = images_zarray.stat().st_mtime_ns
+
+    rebuilt = index_dataset(MerfishDataset.open(root), cache_dir=cache_dir, config=AppConfig())
+    assert rebuilt.segmentation_format_version == 2
+    assert images_zarray.stat().st_mtime_ns == images_mtime, "stain mosaics must not be rebuilt"
+    again = index_dataset(MerfishDataset.open(root), cache_dir=cache_dir, config=AppConfig())
+    assert again.updated_at == rebuilt.updated_at  # nothing left to rebuild
 
 
 def test_adding_masks_later_builds_only_the_boundaries(tmp_path):

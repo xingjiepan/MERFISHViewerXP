@@ -6,6 +6,7 @@ Deliberately independent of napari so it can be reused by other frontends
 
 from __future__ import annotations
 
+import bisect
 import json
 from collections.abc import Iterable
 from pathlib import Path
@@ -17,7 +18,7 @@ import zarr
 
 from .errors import MerfishViewerXPError
 from .indexing.manifest import Manifest, load_manifest
-from .indexing.segmentation import BOUNDARY_ARRAY_NAME
+from .indexing.segmentation import BOUNDARY_ARRAY_NAME, SEGMENTATION_FORMAT_VERSION
 from .model.spots import DEFAULT_SPATIAL_TILE_SIZE_UM, MAX_VISIBLE_POINTS_DEFAULT
 from .model.transforms import MicroscopeTransformParameters
 from .query.lod import apply_lod
@@ -39,6 +40,7 @@ class IndexedDataset:
         self._fovs_df: pd.DataFrame | None = None
         self._mosaic_metadata: dict | None = None
         self._segmentation_metadata: dict | None = None
+        self._cell_id_offsets: tuple[list[int], list[dict]] | None = None
 
     @classmethod
     def open(cls, cache_dir: Path) -> IndexedDataset:
@@ -129,16 +131,35 @@ class IndexedDataset:
         return _open_pyramid_levels(channel_dir)
 
     def has_cell_boundaries(self) -> bool:
-        return bool(self.manifest.components_built.get("segmentation")) and self.cache.segmentation_metadata_path.is_file()
+        if not (self.manifest.components_built.get("segmentation") and self.cache.segmentation_metadata_path.is_file()):
+            return False
+        # A boundary cache in an older format (e.g. kept via --no-segmentation) is not usable.
+        return self.cell_boundary_metadata().get("format_version") == SEGMENTATION_FORMAT_VERSION
 
     def cell_boundary_metadata(self) -> dict:
-        """Mosaic geometry of the cell-boundary overlay (same keys as `mosaic_metadata()` entries)."""
+        """Mosaic geometry of the cell-boundary overlay (same keys as `mosaic_metadata()` entries),
+        plus ``cell_id_ranges`` for mapping cell ids back to FOVs."""
         if self._segmentation_metadata is None:
             self._segmentation_metadata = json.loads(self.cache.segmentation_metadata_path.read_text())
         return self._segmentation_metadata[BOUNDARY_ARRAY_NAME]
 
+    def cell_id_source(self, cell_id: int) -> tuple[int, int] | None:
+        """``(fov_id, label within that FOV's mask)`` for a dataset-wide cell id."""
+        if self._cell_id_offsets is None:
+            ranges = sorted(
+                (r for r in self.cell_boundary_metadata()["cell_id_ranges"] if r["max_label"] > 0),
+                key=lambda r: r["offset"],
+            )
+            self._cell_id_offsets = ([r["offset"] for r in ranges], ranges)
+        offsets, ranges = self._cell_id_offsets
+        i = bisect.bisect_left(offsets, cell_id) - 1
+        if i < 0 or cell_id - offsets[i] > ranges[i]["max_label"]:
+            return None
+        return int(ranges[i]["fov_id"]), int(cell_id - offsets[i])
+
     def cell_boundary_pyramid(self) -> list[zarr.Array]:
-        """uint8 (z, y, x) pyramid levels: 1 on segmented cell boundaries, 0 elsewhere."""
+        """uint32 (z, y, x) pyramid levels: the dataset-wide cell id on segmented cell
+        boundaries, 0 elsewhere (see indexing.segmentation)."""
         if not self.has_cell_boundaries():
             raise MerfishViewerXPError(
                 f"No cell-boundary cache under {self.cache.segmentation_dir}.\n"

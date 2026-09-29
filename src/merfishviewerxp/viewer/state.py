@@ -13,6 +13,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from ..model.spots import MAX_VISIBLE_POINTS_DEFAULT
+from .layers import DEFAULT_CELL_BOUNDARY_COLOR, DEFAULT_CELL_HIGHLIGHT_COLOR
 
 
 class ViewerState(BaseModel):
@@ -51,6 +52,13 @@ class ViewerState(BaseModel):
 
     show_cell_boundaries: bool = False
     cell_boundary_opacity: float = 1.0
+    cell_boundary_default_color: str = DEFAULT_CELL_BOUNDARY_COLOR
+    # Color applied to cells clicked while cell coloring is on.
+    cell_highlight_color: str = DEFAULT_CELL_HIGHLIGHT_COLOR
+    # Per-cell boundary color overrides, keyed by dataset-wide cell id.
+    cell_boundary_colors: dict[int, str] = Field(default_factory=dict)
+    # Mask inventory hash the ids above refer to; ids are only stable while the masks are unchanged.
+    cell_boundary_colors_source: str | None = None
 
     viewport_bounds_um: tuple[float, float, float, float] | None = None
 
@@ -81,6 +89,10 @@ class ViewerState(BaseModel):
             "show_fov_ids": self.show_fov_ids,
             "show_cell_boundaries": self.show_cell_boundaries,
             "cell_boundary_opacity": self.cell_boundary_opacity,
+            "cell_boundary_default_color": self.cell_boundary_default_color,
+            "cell_highlight_color": self.cell_highlight_color,
+            "cell_boundary_colors": self.cell_boundary_colors,
+            "cell_boundary_colors_source": self.cell_boundary_colors_source,
             "z_mode": self.z_mode,
             "z_index": self.z_index,
             "z_range": self.z_range,
@@ -128,4 +140,5 @@ class ViewerState(BaseModel):
             # this a later int-keyed write for the same gene would silently
             # coexist with a stale string-keyed entry instead of replacing it.
             state.gene_colors = {int(k): v for k, v in state.gene_colors.items()}
+            state.cell_boundary_colors = {int(k): v for k, v in state.cell_boundary_colors.items()}
         return state

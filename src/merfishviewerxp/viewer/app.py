@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 
 import napari
 import numpy as np
@@ -21,6 +22,11 @@ from .widgets.main_dock_widget import MainDockWidget
 from .workers import ViewportQueryRunner
 
 logger = logging.getLogger(__name__)
+
+# How far from a cell's edge a click may land and still select it.
+CELL_PICK_MAX_DISTANCE_UM = 15.0
+# Mouse travel (canvas pixels) beyond which a press-release is a pan, not a click.
+CLICK_MAX_MOVE_PX = 4.0
 
 
 class MerfishViewerXPApp:
@@ -61,8 +67,26 @@ class MerfishViewerXPApp:
         for codebook_id in gene_ids_by_codebook:
             self.state.codebook_visible[codebook_id] = False
 
+        if indexed.has_cell_boundaries():
+            # Cell ids are only stable while the masks are unchanged.
+            mask_hash = indexed.manifest.fingerprint.mask_inventory_hash
+            if self.state.cell_boundary_colors and self.state.cell_boundary_colors_source != mask_hash:
+                logger.info(
+                    "Dropping %d saved cell boundary colors: segmentation masks changed since they were chosen",
+                    len(self.state.cell_boundary_colors),
+                )
+                self.state.cell_boundary_colors = {}
+            self.state.cell_boundary_colors_source = mask_hash
+
         self.image_layers: dict[str, napari.layers.Image] = {}
         self.cell_boundary_layer: napari.layers.Image | None = None
+        self._view = layer_builders.DisplayView(
+            z_mode=self.state.z_mode,
+            z_index=self.state.z_index,
+            z_range=tuple(self.state.z_range),
+            cell_colors=layer_builders.cell_color_table(self.state.cell_boundary_colors),
+        )
+        self._cell_coloring_mode = False
         self.transcript_layers: dict[str, napari.layers.Points] = {}
         self._applying_query_result = False
         self._pending_query_result: tuple[object, dict] | None = None
@@ -83,6 +107,7 @@ class MerfishViewerXPApp:
         self.viewer.scene.camera.events.center.connect(self._on_camera_changed)
         self.viewer.scene.camera.events.zoom.connect(self._on_camera_changed)
         self.viewer.mouse_move_callbacks.append(self._on_mouse_move)
+        self.viewer.mouse_drag_callbacks.append(self._on_canvas_click_for_cell_coloring)
 
         self.dock_widget = MainDockWidget(
             experiment_path=str(indexed.cache.dataset_root),
@@ -103,9 +128,7 @@ class MerfishViewerXPApp:
             initial_transcripts_visible=self.state.transcripts_visible,
             max_fov_id=int(indexed.fovs()["fov_id"].max()) if len(indexed.fovs()) else 0,
             callbacks=self._build_callbacks(),
-            cell_boundaries_available=self.cell_boundary_layer is not None,
-            initial_show_cell_boundaries=self.state.show_cell_boundaries,
-            initial_cell_boundary_opacity=self.state.cell_boundary_opacity,
+            cell_boundary_options=self._cell_boundary_control_options() if self.cell_boundary_layer is not None else None,
         )
         self.viewer.window.add_dock_widget(self.dock_widget, area="right", name="MERFISHViewerXP")
 
@@ -121,9 +144,7 @@ class MerfishViewerXPApp:
 
     def _build_image_layers(self) -> None:
         for channel_id in self.indexed.channels():
-            kwargs = layer_builders.image_layer_kwargs(
-                self.indexed, channel_id, z_mode=self.state.z_mode, z_index=self.state.z_index, z_range=self.state.z_range
-            )
+            kwargs = layer_builders.image_layer_kwargs(self.indexed, channel_id, self._view)
             kwargs["visible"] = self.state.image_visibility.get(channel_id, True)
             kwargs["opacity"] = self.state.image_opacity.get(channel_id, 1.0)
             layer = self.viewer.add_image(**kwargs)
@@ -133,11 +154,26 @@ class MerfishViewerXPApp:
         if not self.indexed.has_cell_boundaries():
             return
         kwargs = layer_builders.cell_boundary_layer_kwargs(
-            self.indexed, z_mode=self.state.z_mode, z_index=self.state.z_index, z_range=self.state.z_range
+            self.indexed, self._view, default_color=self.state.cell_boundary_default_color
         )
         kwargs["visible"] = self.state.show_cell_boundaries
         kwargs["opacity"] = self.state.cell_boundary_opacity
         self.cell_boundary_layer = self.viewer.add_image(**kwargs)
+
+    def _cell_boundary_control_options(self) -> dict:
+        return {
+            "initial_visible": self.state.show_cell_boundaries,
+            "initial_opacity": self.state.cell_boundary_opacity,
+            "initial_default_color": self.state.cell_boundary_default_color,
+            "initial_highlight_color": self.state.cell_highlight_color,
+            "initial_colored_cell_count": len(self.state.cell_boundary_colors),
+            "on_visible_changed": self._on_cell_boundaries_visible_changed,
+            "on_opacity_changed": self._on_cell_boundary_opacity_changed,
+            "on_default_color_changed": self._on_cell_boundary_default_color_changed,
+            "on_highlight_color_changed": self._on_cell_highlight_color_changed,
+            "on_coloring_mode_changed": self._on_cell_coloring_mode_changed,
+            "on_clear_cell_colors": self._on_clear_cell_colors,
+        }
 
     def _build_fov_layers(self) -> None:
         polygons, labels, centers = layer_builders.fov_boundary_polygons(self.indexed)
@@ -319,8 +355,6 @@ class MerfishViewerXPApp:
             "on_codebook_visible_changed": self._on_codebook_visible_changed,
             "on_show_fov_boundaries_changed": self._on_show_fov_boundaries_changed,
             "on_show_fov_ids_changed": self._on_show_fov_ids_changed,
-            "on_cell_boundaries_visible_changed": self._on_cell_boundaries_visible_changed,
-            "on_cell_boundary_opacity_changed": self._on_cell_boundary_opacity_changed,
             "on_jump_to_fov": self._on_jump_to_fov,
             "on_jump_to_xy": self._on_jump_to_xy,
         }
@@ -347,18 +381,15 @@ class MerfishViewerXPApp:
         self.image_layers[channel_id].contrast_limits = (lo, hi)
 
     def _refresh_all_image_layers(self) -> None:
-        for channel_id, layer in self.image_layers.items():
-            data = layer_builders.project_z(
-                layer_builders.image_pyramid_as_dask(self.indexed, channel_id),
-                z_mode=self.state.z_mode,
-                z_index=self.state.z_index,
-                z_range=self.state.z_range,
-            )
-            layer.data = data
+        # Layers read the shared view on every tile fetch; refreshing re-reads
+        # them in place (see layers.DisplayView for why data is never reassigned).
+        self._view.z_mode = self.state.z_mode
+        self._view.z_index = self.state.z_index
+        self._view.z_range = tuple(self.state.z_range)
+        for layer in self.image_layers.values():
+            layer.refresh()
         if self.cell_boundary_layer is not None:
-            self.cell_boundary_layer.data = layer_builders.cell_boundary_data(
-                self.indexed, z_mode=self.state.z_mode, z_index=self.state.z_index, z_range=self.state.z_range
-            )
+            self.cell_boundary_layer.refresh()
 
     def _on_z_mode_changed(self, mode: str) -> None:
         self.state.z_mode = mode
@@ -461,6 +492,101 @@ class MerfishViewerXPApp:
             return
         self.state.cell_boundary_opacity = opacity
         self.cell_boundary_layer.opacity = opacity
+
+    def _on_cell_boundary_default_color_changed(self, color_hex: str) -> None:
+        self.state.cell_boundary_default_color = color_hex
+        self.state.save(self.indexed.cache.settings_path)
+        if self.cell_boundary_layer is not None:
+            self.cell_boundary_layer.colormap = layer_builders.cell_boundary_colormap(
+                color_hex, self._view.cell_colors.palette
+            )
+
+    def _on_cell_highlight_color_changed(self, color_hex: str) -> None:
+        self.state.cell_highlight_color = color_hex
+        self.state.save(self.indexed.cache.settings_path)
+
+    def _on_cell_coloring_mode_changed(self, enabled: bool) -> None:
+        self._cell_coloring_mode = enabled
+        controls = self.dock_widget.image_panel.cell_boundary_controls
+        if enabled and controls is not None and not controls.visible_checkbox.isChecked():
+            controls.visible_checkbox.setChecked(True)  # recoloring hidden boundaries would show nothing
+        self.viewer.status = (
+            "Click a cell to give its boundary the highlight color (click again to restore)" if enabled else ""
+        )
+
+    def _on_clear_cell_colors(self) -> None:
+        self.state.cell_boundary_colors = {}
+        self._apply_cell_colors()
+
+    def _apply_cell_colors(self) -> None:
+        """Push `state.cell_boundary_colors` to the layer, the panel count, and settings.json."""
+        table = layer_builders.cell_color_table(self.state.cell_boundary_colors)
+        self._view.cell_colors = table
+        self.state.save(self.indexed.cache.settings_path)
+        controls = self.dock_widget.image_panel.cell_boundary_controls
+        if controls is not None:
+            controls.set_colored_cell_count(len(self.state.cell_boundary_colors))
+        if self.cell_boundary_layer is None:
+            return
+        layer = self.cell_boundary_layer
+        layer.colormap = layer_builders.cell_boundary_colormap(self.state.cell_boundary_default_color, table.palette)
+        layer.contrast_limits = layer_builders.cell_boundary_contrast_limits(table)
+        layer.refresh()
+
+    def pick_cell_id(self, x_um: float, y_um: float) -> int | None:
+        """Dataset-wide id of the segmented cell at (or nearest, within reach of) a world point,
+        using the currently displayed z plane/projection."""
+        if self.cell_boundary_layer is None:
+            return None
+        meta = self.indexed.cell_boundary_metadata()
+        origin_x, origin_y = meta["origin_world_um"]
+        pixel_size = meta["pixel_size_um"][0]
+        height, width = meta["shape_yx"]
+        row = round((y_um - origin_y) / pixel_size)
+        col = round((x_um - origin_x) / pixel_size)
+        reach = math.ceil(CELL_PICK_MAX_DISTANCE_UM / pixel_size)
+        r0, r1 = max(row - reach, 0), min(row + reach + 1, height)
+        c0, c1 = max(col - reach, 0), min(col + reach + 1, width)
+        if r0 >= r1 or c0 >= c1:
+            return None
+        ids = layer_builders.ProjectedLevel(self.indexed.cell_boundary_pyramid()[0], self._view)
+        window = ids[r0:r1, c0:c1]
+        return layer_builders.nearest_cell_id(window, row - r0, col - c0, max_distance_px=reach)
+
+    def toggle_cell_color_at(self, x_um: float, y_um: float) -> int | None:
+        """Give the cell at a world point the highlight color, or restore it if it already has it."""
+        # Notifications rather than viewer.status, which napari overwrites with the
+        # cursor position as soon as the mouse event finishes.
+        cell_id = self.pick_cell_id(x_um, y_um)
+        if cell_id is None:
+            show_info("No segmented cell here")
+            return None
+        highlight = self.state.cell_highlight_color
+        if self.state.cell_boundary_colors.get(cell_id, "").lower() == highlight.lower():
+            del self.state.cell_boundary_colors[cell_id]
+            new_color = "boundary color"
+        else:
+            self.state.cell_boundary_colors[cell_id] = highlight
+            new_color = highlight
+        self._apply_cell_colors()
+        source = self.indexed.cell_id_source(cell_id)
+        where = f" (FOV {source[0]}, mask label {source[1]})" if source else ""
+        show_info(f"Cell {cell_id}{where} -> {new_color}")
+        return cell_id
+
+    def _on_canvas_click_for_cell_coloring(self, _viewer, event):
+        if not self._cell_coloring_mode or self.cell_boundary_layer is None or event.type != "mouse_press":
+            return
+        press_pos = np.asarray(event.pos, dtype=float)
+        moved = False
+        yield
+        while event.type == "mouse_move":
+            moved = moved or np.linalg.norm(np.asarray(event.pos, dtype=float) - press_pos) > CLICK_MAX_MOVE_PX
+            yield
+        if moved:  # a pan, not a click
+            return
+        y_um, x_um = event.position[-2], event.position[-1]
+        self.toggle_cell_color_at(x_um, y_um)
 
     def _on_jump_to_fov(self, fov_id: int) -> None:
         fovs = self.indexed.fovs()

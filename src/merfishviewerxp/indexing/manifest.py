@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from .. import __version__
 from ..model.dataset import DatasetDescriptor
+from .segmentation import SEGMENTATION_FORMAT_VERSION
 
 CACHE_SCHEMA_VERSION = 1
 
@@ -40,6 +41,9 @@ class Manifest(BaseModel):
     indexing_config: dict[str, Any]
     image_orientation_apply: bool
     components_built: dict[str, bool] = {"images": False, "spots": False, "genes": False}
+    # Format of the cached cell boundaries (see indexing.segmentation). Manifests
+    # written before this field existed held format-1 boundaries, if any.
+    segmentation_format_version: int = 1
 
 
 def _file_fingerprint(path: Path) -> str:
@@ -93,9 +97,15 @@ def compute_source_fingerprint(dataset: DatasetDescriptor) -> SourceFingerprint:
 
 
 def build_manifest(
-    dataset: DatasetDescriptor, *, indexing_config: dict[str, Any], now_iso: str, components_built: dict[str, bool]
+    dataset: DatasetDescriptor,
+    *,
+    indexing_config: dict[str, Any],
+    now_iso: str,
+    components_built: dict[str, bool],
+    segmentation_format_version: int = SEGMENTATION_FORMAT_VERSION,
 ) -> Manifest:
     return Manifest(
+        segmentation_format_version=segmentation_format_version,
         cache_schema_version=CACHE_SCHEMA_VERSION,
         merfishviewerxp_version=__version__,
         created_at=now_iso,
@@ -185,6 +195,15 @@ def decide_invalidation(old: Manifest | None, current_fp: SourceFingerprint) -> 
     if masks_changed:
         reasons.append("segmentation mask inventory changed")
     segmentation_missing = has_masks and not old.components_built.get("segmentation", False)
+    segmentation_outdated = (
+        has_masks
+        and not segmentation_missing
+        and old.segmentation_format_version != SEGMENTATION_FORMAT_VERSION
+    )
+    if segmentation_outdated:
+        reasons.append(
+            f"cell-boundary cache format changed ({old.segmentation_format_version} -> {SEGMENTATION_FORMAT_VERSION})"
+        )
 
     missing_components = [k for k, v in old.components_built.items() if not v and k != "segmentation"]
     if segmentation_missing and not masks_changed:
@@ -198,6 +217,8 @@ def decide_invalidation(old: Manifest | None, current_fp: SourceFingerprint) -> 
         rebuild_genes=genes_changed or not old.components_built.get("genes", False),
         # The boundary mosaic shares the stain mosaic's grid, which depends on
         # positions and image shapes, so it follows image changes too.
-        rebuild_segmentation=masks_changed or (has_masks and (images_changed or segmentation_missing)),
+        rebuild_segmentation=masks_changed
+        or segmentation_outdated
+        or (has_masks and (images_changed or segmentation_missing)),
         reasons=reasons or ["unchanged"],
     )

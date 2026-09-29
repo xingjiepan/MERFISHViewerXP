@@ -9,7 +9,8 @@ transform logic living in the GUI code.
 
 from __future__ import annotations
 
-import dask.array as da
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -19,19 +20,72 @@ from ..indexed_dataset import IndexedDataset
 from ..model.genes import gene_color_rgb, hex_to_rgb
 
 
-def image_pyramid_as_dask(indexed: IndexedDataset, channel_id: str) -> list[da.Array]:
-    return [da.from_zarr(arr) for arr in indexed.image_pyramid(channel_id)]
+@dataclass
+class DisplayView:
+    """Display settings shared by the image layers, read whenever napari fetches a tile.
+
+    To change what a layer shows, change these fields and call ``layer.refresh()``
+    -- never assign ``layer.data``. napari 0.9 resets a multiscale layer to its
+    coarsest level but keeps the previous level's corner pixels when its data is
+    replaced, so while zoomed in it slices an empty tile, which some OpenGL
+    drivers reject (``GLError: invalid value`` from ``glTexSubImage2D``).
+    """
+
+    z_mode: str = "max_projection"  # "single" | "max_projection" | "max_projection_range"
+    z_index: int = 0
+    z_range: tuple[int, int] = (0, 0)
+    # Per-cell boundary colors; only read by cell-boundary levels.
+    cell_colors: CellColorTable | None = None
 
 
-def project_z(dask_pyramid: list[da.Array], *, z_mode: str, z_index: int, z_range: tuple[int, int]) -> list[da.Array]:
-    if z_mode == "single":
-        return [arr[min(z_index, arr.shape[0] - 1)] for arr in dask_pyramid]
-    if z_mode == "max_projection":
-        return [arr.max(axis=0) for arr in dask_pyramid]
-    if z_mode == "max_projection_range":
-        z0, z1 = z_range
-        return [arr[z0 : z1 + 1].max(axis=0) for arr in dask_pyramid]
-    raise ValueError(f"Unknown z_mode {z_mode!r}")
+class ProjectedLevel:
+    """One (z, y, x) pyramid level presented to napari as a lazy 2-D (y, x) array.
+
+    Each read projects over z according to the shared `DisplayView`. With
+    ``color_cells`` the source holds cell ids and every z-plane is mapped to
+    boundary display values (see `CellColorTable`) before projecting, so a
+    recolored cell keeps its whole outline under max projection even where
+    another plane has a larger id.
+    """
+
+    def __init__(self, source, view: DisplayView, *, color_cells: bool = False) -> None:
+        self._source = source
+        self._view = view
+        self._color_cells = color_cells
+        self.dtype = np.dtype(np.uint8) if color_cells else np.dtype(source.dtype)
+        self.shape = tuple(source.shape[1:])
+        self.ndim = len(self.shape)
+        self.size = int(np.prod(self.shape))
+
+    def __len__(self) -> int:
+        return self.shape[0]
+
+    def _z_slice(self) -> slice:
+        n_z = self._source.shape[0]
+        view = self._view
+        if view.z_mode == "single":
+            z = min(max(int(view.z_index), 0), n_z - 1)
+            return slice(z, z + 1)
+        if view.z_mode == "max_projection":
+            return slice(0, n_z)
+        if view.z_mode == "max_projection_range":
+            z0, z1 = view.z_range
+            return slice(max(int(z0), 0), min(int(z1), n_z - 1) + 1)
+        raise ValueError(f"Unknown z_mode {view.z_mode!r}")
+
+    def __getitem__(self, key):
+        key = key if isinstance(key, tuple) else (key,)
+        if any(k is Ellipsis for k in key):
+            i = key.index(Ellipsis)
+            key = key[:i] + (slice(None),) * (self.ndim - len(key) + 1) + key[i + 1 :]
+        planes = np.asarray(self._source[(self._z_slice(), *key)])
+        if self._color_cells:
+            planes = color_cell_boundary_block(planes, self._view.cell_colors or _NO_CELL_COLORS)
+        return planes.max(axis=0)
+
+    def __array__(self, dtype=None, copy=None):
+        data = self[...]
+        return data if dtype is None else data.astype(dtype)
 
 
 def visible_world_bounds(viewer) -> tuple[float, float, float, float]:
@@ -58,13 +112,12 @@ def visible_world_bounds(viewer) -> tuple[float, float, float, float]:
     return cx - half_width, cy - half_height, cx + half_width, cy + half_height
 
 
-def image_layer_kwargs(indexed: IndexedDataset, channel_id: str, *, z_mode: str, z_index: int, z_range: tuple[int, int]) -> dict:
+def image_layer_kwargs(indexed: IndexedDataset, channel_id: str, view: DisplayView) -> dict:
     meta = indexed.mosaic_metadata()[channel_id]
     origin_x, origin_y = meta["origin_world_um"]
     pixel_size_x, pixel_size_y = meta["pixel_size_um"]
-    data = project_z(image_pyramid_as_dask(indexed, channel_id), z_mode=z_mode, z_index=z_index, z_range=z_range)
     return {
-        "data": data,
+        "data": [ProjectedLevel(level, view) for level in indexed.image_pyramid(channel_id)],
         "multiscale": True,
         "name": channel_id,
         "scale": (pixel_size_y, pixel_size_x),
@@ -75,36 +128,94 @@ def image_layer_kwargs(indexed: IndexedDataset, channel_id: str, *, z_mode: str,
 
 
 CELL_BOUNDARY_LAYER_NAME = "Cell boundaries"
-CELL_BOUNDARY_RGBA = (1.0, 0.0, 1.0, 1.0)
+DEFAULT_CELL_BOUNDARY_COLOR = "#ff00ff"
+DEFAULT_CELL_HIGHLIGHT_COLOR = "#ffff00"
+# Display values: 0 = not a boundary (transparent), 1 = default color, 2.. = per-cell colors.
+_FIRST_OVERRIDE_INDEX = 2
+_MAX_OVERRIDE_COLORS = 255 - _FIRST_OVERRIDE_INDEX
 
 
-def cell_boundary_colormap():
+@dataclass(frozen=True)
+class CellColorTable:
+    """Per-cell boundary color overrides, as a sorted lookup used to color tiles."""
+
+    cell_ids: np.ndarray  # sorted uint32 cell ids that have an override
+    display_index: np.ndarray  # uint8 display value for each of those ids
+    palette: tuple[str, ...]  # override colors; palette[k] is display value k + 2
+
+
+_NO_CELL_COLORS = CellColorTable(
+    cell_ids=np.zeros(0, dtype=np.uint32), display_index=np.zeros(0, dtype=np.uint8), palette=()
+)
+
+
+def cell_color_table(cell_colors: dict[int, str]) -> CellColorTable:
+    palette = tuple(sorted({c.lower() for c in cell_colors.values()}))
+    if len(palette) > _MAX_OVERRIDE_COLORS:
+        raise ValueError(f"At most {_MAX_OVERRIDE_COLORS} distinct cell colors are supported, got {len(palette)}")
+    value_of = {color: i + _FIRST_OVERRIDE_INDEX for i, color in enumerate(palette)}
+    cell_ids = np.array(sorted(cell_colors), dtype=np.uint32)
+    display_index = np.array([value_of[cell_colors[int(c)].lower()] for c in cell_ids], dtype=np.uint8)
+    return CellColorTable(cell_ids=cell_ids, display_index=display_index, palette=palette)
+
+
+def color_cell_boundary_block(block: np.ndarray, table: CellColorTable) -> np.ndarray:
+    """Map a block of cell ids to display values (see `CellColorTable`)."""
+    out = (block > 0).astype(np.uint8)
+    if table.cell_ids.size:
+        pos = np.minimum(np.searchsorted(table.cell_ids, block), table.cell_ids.size - 1)
+        hit = (table.cell_ids[pos] == block) & (block > 0)
+        out[hit] = table.display_index[pos[hit]]
+    return out
+
+
+def cell_boundary_colormap(default_color: str, palette: tuple[str, ...]):
     from napari.utils.colormaps import Colormap
 
-    # Transparent at 0 so only boundary pixels are drawn over the stain images.
-    return Colormap(colors=[(0.0, 0.0, 0.0, 0.0), CELL_BOUNDARY_RGBA], name="cell_boundaries")
+    colors = [(0.0, 0.0, 0.0, 0.0), (*hex_to_rgb(default_color), 1.0)] + [(*hex_to_rgb(c), 1.0) for c in palette]
+    n = len(colors)
+    # One bin per integer display value 0..n-1 once scaled by contrast limits (0, n - 1).
+    controls = [0.0] + [(k + 0.5) / (n - 1) for k in range(n - 1)] + [1.0]
+    return Colormap(colors=colors, controls=controls, interpolation="zero", name="cell_boundaries")
 
 
-def cell_boundary_data(indexed: IndexedDataset, *, z_mode: str, z_index: int, z_range: tuple[int, int]) -> list[da.Array]:
-    pyramid = [da.from_zarr(arr) for arr in indexed.cell_boundary_pyramid()]
-    return project_z(pyramid, z_mode=z_mode, z_index=z_index, z_range=z_range)
+def cell_boundary_contrast_limits(table: CellColorTable) -> tuple[int, int]:
+    return 0, len(table.palette) + _FIRST_OVERRIDE_INDEX - 1
 
 
-def cell_boundary_layer_kwargs(indexed: IndexedDataset, *, z_mode: str, z_index: int, z_range: tuple[int, int]) -> dict:
+def cell_boundary_layer_kwargs(indexed: IndexedDataset, view: DisplayView, *, default_color: str) -> dict:
     meta = indexed.cell_boundary_metadata()
     origin_x, origin_y = meta["origin_world_um"]
     pixel_size_x, pixel_size_y = meta["pixel_size_um"]
+    table = view.cell_colors or _NO_CELL_COLORS
     return {
-        "data": cell_boundary_data(indexed, z_mode=z_mode, z_index=z_index, z_range=z_range),
+        "data": [ProjectedLevel(level, view, color_cells=True) for level in indexed.cell_boundary_pyramid()],
         "multiscale": True,
         "name": CELL_BOUNDARY_LAYER_NAME,
         "scale": (pixel_size_y, pixel_size_x),
         "translate": (origin_y, origin_x),
-        "colormap": cell_boundary_colormap(),
-        "contrast_limits": (0, 1),
+        "colormap": cell_boundary_colormap(default_color, table.palette),
+        "contrast_limits": cell_boundary_contrast_limits(table),
         "blending": "translucent",
         "interpolation2d": "nearest",
     }
+
+
+def nearest_cell_id(window: np.ndarray, row: int, col: int, *, max_distance_px: float) -> int | None:
+    """Cell id of the boundary pixel nearest to (row, col) in a 2-D cell-id window.
+
+    From inside a cell, the nearest boundary pixel is that cell's own inner
+    edge (any other cell's edge lies beyond it), so this picks the clicked cell.
+    """
+    height, width = window.shape
+    if not (0 <= row < height and 0 <= col < width) or not window.any():
+        return None
+    from scipy.ndimage import distance_transform_edt
+
+    distance, (rows, cols) = distance_transform_edt(window == 0, return_indices=True)
+    if distance[row, col] > max_distance_px:
+        return None
+    return int(window[rows[row, col], cols[row, col]])
 
 
 def spot_table_to_points(

@@ -1,22 +1,25 @@
 """Build a global cell-boundary mosaic from per-FOV segmentation label masks.
 
 Each FOV's mask is a (z, y, x) label image (0 = background, one integer per
-cell, numbered independently in every FOV). Label ids are therefore not
-comparable across FOVs, and neither blending nor mean-downsampling preserves
-them, so the cache stores *boundaries* rather than labels: a uint8 mosaic that
-is 1 on the inner edge of every cell in each z-plane and 0 elsewhere. It uses
+cell, numbered independently in every FOV). Neither blending nor
+mean-downsampling preserves labels, and full label images would be large, so
+the cache stores *boundaries*: a uint32 mosaic that holds a dataset-wide cell
+id on the inner edge of every cell in each z-plane and 0 elsewhere. A cell's
+id is its FOV's label offset plus its label within that FOV, so ids are unique
+across FOVs and stable as long as the masks don't change. The mosaic uses
 exactly the same global grid as the stain-image mosaic, so it overlays the
 images with no extra transform, and the viewer's z modes (single plane, max
 projection) apply to it unchanged.
 
 Where FOVs overlap, boundaries from every FOV are kept (union), so both
-segmentations of a cell in an overlap band remain visible.
+segmentations of a cell in an overlap band remain visible (as two ids).
 """
 
 from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +39,22 @@ from .image_mosaic import (
 logger = logging.getLogger(__name__)
 
 BOUNDARY_ARRAY_NAME = "boundaries"
+# Bump whenever the cached boundary representation changes, so existing caches rebuild it.
+# 1: uint8 0/1 boundaries. 2: uint32 dataset-wide cell ids on boundaries.
+SEGMENTATION_FORMAT_VERSION = 2
+
+
+@dataclass
+class BoundaryMosaicResult:
+    geometry: MosaicGeometry
+    touched_chunks: set[tuple[int, int]]
+    n_fovs: int
+    # (fov_id, id offset, max local label): cell id = offset + local label
+    cell_id_ranges: list[tuple[int, int, int]] = field(default_factory=list)
+
+    @property
+    def n_cell_ids(self) -> int:
+        return sum(n for _, _, n in self.cell_id_ranges)
 
 
 def label_boundaries(labels: np.ndarray) -> np.ndarray:
@@ -73,18 +92,19 @@ def build_boundary_mosaic(
     level0_out_path: Path,
     chunk_size: int = 512,
     progress_callback: Callable[[int, int], None] | None = None,
-) -> tuple[MosaicGeometry, set[tuple[int, int]], int]:
-    """Write the level-0 boundary mosaic. Returns (geometry, touched chunks, FOVs placed)."""
+) -> BoundaryMosaicResult:
+    """Write the level-0 cell-id boundary mosaic."""
     geometry = compute_global_mosaic_geometry(dataset)
     fovs = [f for f in dataset.fovs if f.mask_path is not None and f.image_shape_zyx is not None]
     out = create_array(
         level0_out_path,
         shape=(geometry.z_count, geometry.height_px, geometry.width_px),
         chunks=(1, chunk_size, chunk_size),
-        dtype=np.uint8,
+        dtype=np.uint32,
     )
 
-    n_placed = 0
+    cell_id_ranges: list[tuple[int, int, int]] = []
+    next_offset = 0
     for i, fov in enumerate(fovs):
         extent = fov_pixel_extent(fov, dataset, geometry)
         if extent is not None:
@@ -104,14 +124,25 @@ def build_boundary_mosaic(
                     flip_vertical=dataset.microscope.flip_vertical,
                     transpose=dataset.microscope.transpose,
                 )
-            boundary = label_boundaries(labels).astype(np.uint8)
-            crop = boundary[:, row0c - row0 : row1c - row0, col0c - col0 : col1c - col0]
+            max_label = int(labels.max()) if labels.size else 0
+            if next_offset + max_label > np.iinfo(np.uint32).max:
+                raise DatasetValidationError("Too many segmented cells for uint32 cell ids.")
+            cell_ids = np.where(label_boundaries(labels), labels.astype(np.uint32) + np.uint32(next_offset), 0)
+            crop = cell_ids[:, row0c - row0 : row1c - row0, col0c - col0 : col1c - col0].astype(np.uint32)
             existing = out[:, row0c:row1c, col0c:col1c]
             out[:, row0c:row1c, col0c:col1c] = np.maximum(existing, crop)
-            n_placed += 1
+            cell_id_ranges.append((fov.fov_id, next_offset, max_label))
+            next_offset += max_label
         if progress_callback:
             progress_callback(i + 1, len(fovs))
 
     touched = touched_chunks_for_fovs(fovs, dataset, geometry, chunk_size=chunk_size)
-    logger.info("Built cell-boundary mosaic from %d FOV masks, geometry=%s", n_placed, geometry)
-    return geometry, touched, n_placed
+    logger.info(
+        "Built cell-boundary mosaic from %d FOV masks (%d cell ids), geometry=%s",
+        len(cell_id_ranges),
+        next_offset,
+        geometry,
+    )
+    return BoundaryMosaicResult(
+        geometry=geometry, touched_chunks=touched, n_fovs=len(cell_id_ranges), cell_id_ranges=cell_id_ranges
+    )
