@@ -24,6 +24,10 @@ class SourceFingerprint(BaseModel):
     barcode_exports: dict[str, str]
     image_inventory_hash: str
     image_file_count: int
+    # Defaults keep manifests written before segmentation support loadable;
+    # "" is also what a dataset with no masks hashes to.
+    mask_inventory_hash: str = ""
+    mask_file_count: int = 0
 
 
 class Manifest(BaseModel):
@@ -57,8 +61,25 @@ def compute_image_inventory_hash(dataset: DatasetDescriptor) -> tuple[str, int]:
     return digest, len(entries)
 
 
+def compute_mask_inventory_hash(dataset: DatasetDescriptor) -> tuple[str, int]:
+    entries = []
+    for fov in dataset.fovs:
+        if fov.mask_path is None:
+            continue
+        try:
+            stat = fov.mask_path.stat()
+        except FileNotFoundError:
+            continue
+        entries.append(f"{fov.fov_id}:{fov.mask_path.name}:{stat.st_size}:{int(stat.st_mtime_ns)}")
+    if not entries:
+        return "", 0
+    entries.sort()
+    return hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest(), len(entries)
+
+
 def compute_source_fingerprint(dataset: DatasetDescriptor) -> SourceFingerprint:
     image_hash, image_count = compute_image_inventory_hash(dataset)
+    mask_hash, mask_count = compute_mask_inventory_hash(dataset)
     return SourceFingerprint(
         positions=_file_fingerprint(dataset.positions_file),
         microscope=_file_fingerprint(dataset.microscope_file),
@@ -66,6 +87,8 @@ def compute_source_fingerprint(dataset: DatasetDescriptor) -> SourceFingerprint:
         barcode_exports={be.export_id: be.fingerprint for be in dataset.barcode_exports},
         image_inventory_hash=image_hash,
         image_file_count=image_count,
+        mask_inventory_hash=mask_hash,
+        mask_file_count=mask_count,
     )
 
 
@@ -107,17 +130,26 @@ class InvalidationDecision(BaseModel):
     rebuild_images: bool
     rebuild_spots: bool
     rebuild_genes: bool
+    # Also set when masks disappear, so the indexer removes stale boundaries.
+    rebuild_segmentation: bool = False
     reasons: list[str]
 
     @property
     def rebuild_anything(self) -> bool:
-        return self.rebuild_images or self.rebuild_spots or self.rebuild_genes
+        return self.rebuild_images or self.rebuild_spots or self.rebuild_genes or self.rebuild_segmentation
 
 
 def decide_invalidation(old: Manifest | None, current_fp: SourceFingerprint) -> InvalidationDecision:
     """Decide which cache components must be rebuilt (spec 15.3)."""
+    has_masks = current_fp.mask_file_count > 0
     if old is None:
-        return InvalidationDecision(rebuild_images=True, rebuild_spots=True, rebuild_genes=True, reasons=["no existing cache"])
+        return InvalidationDecision(
+            rebuild_images=True,
+            rebuild_spots=True,
+            rebuild_genes=True,
+            rebuild_segmentation=has_masks,
+            reasons=["no existing cache"],
+        )
 
     reasons: list[str] = []
     if old.cache_schema_version != CACHE_SCHEMA_VERSION:
@@ -125,6 +157,7 @@ def decide_invalidation(old: Manifest | None, current_fp: SourceFingerprint) -> 
             rebuild_images=True,
             rebuild_spots=True,
             rebuild_genes=True,
+            rebuild_segmentation=has_masks,
             reasons=[f"cache schema version changed ({old.cache_schema_version} -> {CACHE_SCHEMA_VERSION})"],
         )
 
@@ -148,7 +181,14 @@ def decide_invalidation(old: Manifest | None, current_fp: SourceFingerprint) -> 
     spots_changed = coords_changed or codebooks_changed or barcodes_changed
     genes_changed = codebooks_changed or barcodes_changed
 
-    missing_components = [k for k, v in old.components_built.items() if not v]
+    masks_changed = old.fingerprint.mask_inventory_hash != current_fp.mask_inventory_hash
+    if masks_changed:
+        reasons.append("segmentation mask inventory changed")
+    segmentation_missing = has_masks and not old.components_built.get("segmentation", False)
+
+    missing_components = [k for k, v in old.components_built.items() if not v and k != "segmentation"]
+    if segmentation_missing and not masks_changed:
+        missing_components.append("segmentation")
     if missing_components:
         reasons.append(f"previously incomplete components: {missing_components}")
 
@@ -156,5 +196,8 @@ def decide_invalidation(old: Manifest | None, current_fp: SourceFingerprint) -> 
         rebuild_images=images_changed or not old.components_built.get("images", False),
         rebuild_spots=spots_changed or not old.components_built.get("spots", False),
         rebuild_genes=genes_changed or not old.components_built.get("genes", False),
+        # The boundary mosaic shares the stain mosaic's grid, which depends on
+        # positions and image shapes, so it follows image changes too.
+        rebuild_segmentation=masks_changed or (has_masks and (images_changed or segmentation_missing)),
         reasons=reasons or ["unchanged"],
     )

@@ -52,3 +52,12 @@ def gene_color_rgb(gene_name: str, palette_size: int = DEFAULT_PALETTE_SIZE) -> 
 def gene_color_hex(gene_name: str, palette_size: int = DEFAULT_PALETTE_SIZE) -> str:
     r, g, b = gene_color_rgb(gene_name, palette_size)
     return f"#{round(r * 255):02x}{round(g * 255):02x}{round(b * 255):02x}"
+
+
+def hex_to_rgb(color_hex: str) -> tuple[float, float, float]:
+    """Inverse of `gene_color_hex`, for user-chosen color overrides (spec-adjacent extension)."""
+    color_hex = color_hex.lstrip("#")
+    r = int(color_hex[0:2], 16) / 255
+    g = int(color_hex[2:4], 16) / 255
+    b = int(color_hex[4:6], 16) / 255
+    return r, g, b

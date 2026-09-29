@@ -41,6 +41,14 @@ class CacheManager:
         return self.images_dir / "mosaic_metadata.json"
 
     @property
+    def segmentation_dir(self) -> Path:
+        return self.cache_dir / "segmentation.zarr"
+
+    @property
+    def segmentation_metadata_path(self) -> Path:
+        return self.segmentation_dir / "mosaic_metadata.json"
+
+    @property
     def logs_dir(self) -> Path:
         return self.cache_dir / "logs"
 

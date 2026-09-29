@@ -36,6 +36,10 @@ class ViewerState(BaseModel):
     active_gene_ids_by_codebook: dict[str, list[int]] = Field(default_factory=dict)
     codebook_symbols: dict[str, str] = Field(default_factory=dict)
     codebook_visible: dict[str, bool] = Field(default_factory=dict)
+    # User-chosen color overrides, keyed by the global (codebook-independent)
+    # gene_id; a gene without an entry here uses its deterministic default
+    # color (see model.genes.gene_color_hex).
+    gene_colors: dict[int, str] = Field(default_factory=dict)
     include_blanks: bool = False
     point_size: float = 4.0
     point_opacity: float = 0.9
@@ -44,6 +48,9 @@ class ViewerState(BaseModel):
 
     show_fov_boundaries: bool = False
     show_fov_ids: bool = False
+
+    show_cell_boundaries: bool = False
+    cell_boundary_opacity: float = 1.0
 
     viewport_bounds_um: tuple[float, float, float, float] | None = None
 
@@ -63,6 +70,7 @@ class ViewerState(BaseModel):
         return {
             "active_gene_ids_by_codebook": self.active_gene_ids_by_codebook,
             "codebook_symbols": self.codebook_symbols,
+            "gene_colors": self.gene_colors,
             "include_blanks": self.include_blanks,
             "lod_mode": self.lod_mode,
             "point_size": self.point_size,
@@ -71,6 +79,8 @@ class ViewerState(BaseModel):
             "image_opacity": self.image_opacity,
             "show_fov_boundaries": self.show_fov_boundaries,
             "show_fov_ids": self.show_fov_ids,
+            "show_cell_boundaries": self.show_cell_boundaries,
+            "cell_boundary_opacity": self.cell_boundary_opacity,
             "z_mode": self.z_mode,
             "z_index": self.z_index,
             "z_range": self.z_range,
@@ -111,4 +121,11 @@ class ViewerState(BaseModel):
             for key, value in saved.items():
                 if hasattr(state, key):
                     setattr(state, key, value)
+            # JSON object keys are always strings, but `gene_colors` is
+            # keyed by the integer gene_id everywhere else in the app (see
+            # MerfishViewerXPApp._on_gene_color_changed) -- pydantic's plain
+            # `setattr` above does not coerce dict key types, so without
+            # this a later int-keyed write for the same gene would silently
+            # coexist with a stale string-keyed entry instead of replacing it.
+            state.gene_colors = {int(k): v for k, v in state.gene_colors.items()}
         return state

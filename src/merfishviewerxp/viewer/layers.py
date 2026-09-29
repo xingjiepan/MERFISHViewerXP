@@ -16,7 +16,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from ..indexed_dataset import IndexedDataset
-from ..model.genes import gene_color_rgb
+from ..model.genes import gene_color_rgb, hex_to_rgb
 
 
 def image_pyramid_as_dask(indexed: IndexedDataset, channel_id: str) -> list[da.Array]:
@@ -74,21 +74,70 @@ def image_layer_kwargs(indexed: IndexedDataset, channel_id: str, *, z_mode: str,
     }
 
 
-def spot_table_to_points(table: pa.Table) -> tuple[np.ndarray, np.ndarray, dict]:
-    """Return (coords, face_colors, features) for a Points layer from a query result."""
+CELL_BOUNDARY_LAYER_NAME = "Cell boundaries"
+CELL_BOUNDARY_RGBA = (1.0, 0.0, 1.0, 1.0)
+
+
+def cell_boundary_colormap():
+    from napari.utils.colormaps import Colormap
+
+    # Transparent at 0 so only boundary pixels are drawn over the stain images.
+    return Colormap(colors=[(0.0, 0.0, 0.0, 0.0), CELL_BOUNDARY_RGBA], name="cell_boundaries")
+
+
+def cell_boundary_data(indexed: IndexedDataset, *, z_mode: str, z_index: int, z_range: tuple[int, int]) -> list[da.Array]:
+    pyramid = [da.from_zarr(arr) for arr in indexed.cell_boundary_pyramid()]
+    return project_z(pyramid, z_mode=z_mode, z_index=z_index, z_range=z_range)
+
+
+def cell_boundary_layer_kwargs(indexed: IndexedDataset, *, z_mode: str, z_index: int, z_range: tuple[int, int]) -> dict:
+    meta = indexed.cell_boundary_metadata()
+    origin_x, origin_y = meta["origin_world_um"]
+    pixel_size_x, pixel_size_y = meta["pixel_size_um"]
+    return {
+        "data": cell_boundary_data(indexed, z_mode=z_mode, z_index=z_index, z_range=z_range),
+        "multiscale": True,
+        "name": CELL_BOUNDARY_LAYER_NAME,
+        "scale": (pixel_size_y, pixel_size_x),
+        "translate": (origin_y, origin_x),
+        "colormap": cell_boundary_colormap(),
+        "contrast_limits": (0, 1),
+        "blending": "translucent",
+        "interpolation2d": "nearest",
+    }
+
+
+def spot_table_to_points(
+    table: pa.Table, color_overrides: dict[int, str] | None = None
+) -> tuple[np.ndarray, np.ndarray, dict]:
+    """Return (coords, face_colors, features) for a Points layer from a query result.
+
+    `color_overrides` maps `gene_id` to a user-chosen hex color (spec-adjacent
+    extension); a gene without an override falls back to its deterministic
+    default color.
+    """
     n = table.num_rows
     if n == 0:
-        return np.empty((0, 2)), np.empty((0, 4)), {"gene_name": [], "spot_id": []}
+        return np.empty((0, 2)), np.empty((0, 4)), {"gene_name": [], "gene_id": [], "spot_id": []}
 
     x = table.column("world_x_um").to_numpy(zero_copy_only=False)
     y = table.column("world_y_um").to_numpy(zero_copy_only=False)
     coords = np.column_stack([y, x])  # napari (row, col) = (y, x)
 
+    gene_ids = table.column("gene_id").to_pylist()
     gene_names = table.column("gene_name").to_pylist()
-    colors = np.array([(*gene_color_rgb(g), 1.0) for g in gene_names], dtype=float)
+    overrides = color_overrides or {}
+    colors = np.array(
+        [
+            (*hex_to_rgb(overrides[gid]), 1.0) if gid in overrides else (*gene_color_rgb(name), 1.0)
+            for gid, name in zip(gene_ids, gene_names, strict=True)
+        ],
+        dtype=float,
+    )
 
     features = {
         "gene_name": gene_names,
+        "gene_id": gene_ids,
         "spot_id": table.column("spot_id").to_pylist(),
         "fov_id": table.column("fov_id").to_pylist(),
         "codebook_id": table.column("codebook_id").to_pylist(),

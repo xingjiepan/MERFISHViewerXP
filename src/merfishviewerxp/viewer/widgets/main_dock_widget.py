@@ -26,6 +26,7 @@ class MainDockWidget(QScrollArea):
         initial_active_gene_ids_by_codebook: dict[str, set[int]],
         initial_symbols_by_codebook: dict[str, str],
         initial_visible_by_codebook: dict[str, bool],
+        initial_gene_colors_by_id: dict[int, str],
         initial_point_size: float,
         initial_point_opacity: float,
         initial_include_blanks: bool,
@@ -33,6 +34,9 @@ class MainDockWidget(QScrollArea):
         initial_transcripts_visible: bool,
         max_fov_id: int,
         callbacks: dict[str, Callable],
+        cell_boundaries_available: bool = False,
+        initial_show_cell_boundaries: bool = False,
+        initial_cell_boundary_opacity: float = 1.0,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -58,6 +62,11 @@ class MainDockWidget(QScrollArea):
             on_z_mode_changed=callbacks["on_z_mode_changed"],
             on_z_index_changed=callbacks["on_z_index_changed"],
             on_z_range_changed=callbacks["on_z_range_changed"],
+            cell_boundaries_available=cell_boundaries_available,
+            initial_show_cell_boundaries=initial_show_cell_boundaries,
+            initial_cell_boundary_opacity=initial_cell_boundary_opacity,
+            on_cell_boundaries_visible_changed=callbacks.get("on_cell_boundaries_visible_changed"),
+            on_cell_boundary_opacity_changed=callbacks.get("on_cell_boundary_opacity_changed"),
         )
         layout.addWidget(self.image_panel)
 
@@ -83,9 +92,11 @@ class MainDockWidget(QScrollArea):
                 initial_active_gene_ids=initial_active_gene_ids_by_codebook.get(codebook_id, set()),
                 initial_symbol=initial_symbols_by_codebook.get(codebook_id, "disc"),
                 initial_visible=initial_visible_by_codebook.get(codebook_id, False),
+                initial_gene_colors=initial_gene_colors_by_id,
                 on_selection_changed=callbacks["on_gene_selection_changed"],
                 on_symbol_changed=callbacks["on_codebook_symbol_changed"],
                 on_visible_changed=callbacks["on_codebook_visible_changed"],
+                on_color_changed=callbacks["on_gene_color_changed"],
             )
             self.codebook_panels[codebook_id] = panel
             layout.addWidget(panel)

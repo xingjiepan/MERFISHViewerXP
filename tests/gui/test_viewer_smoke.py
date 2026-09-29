@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import napari
+import numpy as np
 import pytest
 from fixtures.synthetic_dataset import build_synthetic_dataset
 
@@ -98,6 +99,58 @@ def test_changing_codebook_symbol_updates_its_layer_only(app_instance):
 
     assert all(str(s) == "star" for s in app.transcript_layers["CB0"].symbol)
     assert [str(s) for s in app.transcript_layers["CB1"].symbol] == cb1_symbols_before
+
+
+def test_double_clicking_a_gene_recolors_its_already_loaded_points(app_instance, monkeypatch):
+    from qtpy.QtGui import QColor
+
+    from merfishviewerxp.model.genes import hex_to_rgb
+    from merfishviewerxp.viewer.widgets.gene_panel import GENE_ID_ROLE
+
+    app, qtbot = app_instance
+    _wait_for_query(app, qtbot)
+    qtbot.waitUntil(lambda: app.transcript_layers["CB0"].data.shape[0] > 0, timeout=5000)
+
+    layer = app.transcript_layers["CB0"]
+    gene_id = int(next(iter(layer.features["gene_id"])))
+    panel = app.dock_widget.codebook_panels["CB0"]
+    item = next(
+        panel.list_widget.item(i)
+        for i in range(panel.list_widget.count())
+        if panel.list_widget.item(i).data(GENE_ID_ROLE) == gene_id
+    )
+
+    monkeypatch.setattr(
+        "merfishviewerxp.viewer.widgets.gene_panel.QColorDialog.getColor",
+        lambda *args, **kwargs: QColor("#123456"),
+    )
+    panel._handle_item_double_clicked(item)
+
+    assert app.state.gene_colors[gene_id] == "#123456"
+    mask = np.asarray(list(layer.features["gene_id"])) == gene_id
+    assert mask.any()
+    expected = (*hex_to_rgb("#123456"), 1.0)
+    for c in np.array(layer.face_color)[mask]:
+        assert tuple(c) == pytest.approx(expected)
+
+
+def test_gene_color_dialog_cancel_leaves_color_unchanged(app_instance, monkeypatch):
+    from qtpy.QtGui import QColor
+
+    from merfishviewerxp.viewer.widgets.gene_panel import GENE_ID_ROLE
+
+    app, qtbot = app_instance
+    panel = app.dock_widget.codebook_panels["CB0"]
+    item = panel.list_widget.item(0)
+    gene_id = item.data(GENE_ID_ROLE)
+
+    monkeypatch.setattr(
+        "merfishviewerxp.viewer.widgets.gene_panel.QColorDialog.getColor",
+        lambda *args, **kwargs: QColor(),  # invalid -- simulates the user hitting Cancel
+    )
+    panel._handle_item_double_clicked(item)
+
+    assert gene_id not in app.state.gene_colors
 
 
 def test_symbol_survives_a_fresh_data_replacement(app_instance):

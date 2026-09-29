@@ -91,7 +91,7 @@ def orient_image_array(arr: np.ndarray, *, flip_horizontal: bool, flip_vertical:
     return arr
 
 
-def _fov_pixel_extent(
+def fov_pixel_extent(
     fov, dataset: DatasetDescriptor, geometry: MosaicGeometry
 ) -> tuple[int, int, int, int, int, int] | None:
     """``(row0, col0, row0_clipped, col0_clipped, row1_clipped, col1_clipped)`` for
@@ -119,11 +119,16 @@ def compute_touched_chunks(
     the mosaic and to repair/rebuild pyramid levels from an already-built
     level-0 array without re-reading any source TIFFs.
     """
+    fovs = [fov for fov in dataset.fovs if channel_id in fov.image_paths]
+    return touched_chunks_for_fovs(fovs, dataset, geometry, chunk_size=chunk_size)
+
+
+def touched_chunks_for_fovs(
+    fovs, dataset: DatasetDescriptor, geometry: MosaicGeometry, *, chunk_size: int
+) -> set[tuple[int, int]]:
     touched: set[tuple[int, int]] = set()
-    for fov in dataset.fovs:
-        if channel_id not in fov.image_paths:
-            continue
-        extent = _fov_pixel_extent(fov, dataset, geometry)
+    for fov in fovs:
+        extent = fov_pixel_extent(fov, dataset, geometry)
         if extent is None:
             continue
         _, _, row0c, col0c, row1c, col1c = extent
@@ -182,7 +187,7 @@ def build_channel_mosaic(
 
     fovs_with_images = [f for f in dataset.fovs if channel_id in f.image_paths and f.image_shape_zyx is not None]
     for i, fov in enumerate(fovs_with_images):
-        extent = _fov_pixel_extent(fov, dataset, geometry)
+        extent = fov_pixel_extent(fov, dataset, geometry)
         if extent is None:
             continue
         row0, col0, row0c, col0c, row1c, col1c = extent

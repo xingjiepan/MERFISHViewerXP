@@ -32,6 +32,13 @@ MARKER_ROW = 2
 MARKER_COL = 10
 MARKER_VALUE = 1000.0
 
+# Optional segmentation mask: one rectangular cell per FOV whose top-left
+# corner is the marker pixel (so the marker is a boundary pixel) and whose
+# center pixel is interior (never a boundary pixel).
+CELL_ROWS = (MARKER_ROW, MARKER_ROW + 5)  # [start, stop)
+CELL_COLS = (MARKER_COL, MARKER_COL + 6)
+CELL_INTERIOR_PIXEL = (MARKER_ROW + 2, MARKER_COL + 2)
+
 FOV_POSITIONS = {
     0: (0.0, 0.0),
     1: (COLUMN_PITCH_UM, 0.0),
@@ -57,7 +64,20 @@ def _make_marker_stack(fov_id: int) -> np.ndarray:
     return arr
 
 
-def build_synthetic_dataset(root: Path) -> dict:
+def _make_mask_stack() -> np.ndarray:
+    # float32 like CellPose's real exports
+    mask = np.zeros((1, IMAGE_HEIGHT, IMAGE_WIDTH), dtype=np.float32)
+    mask[0, CELL_ROWS[0] : CELL_ROWS[1], CELL_COLS[0] : CELL_COLS[1]] = 1.0
+    return mask
+
+
+def write_synthetic_masks(root: Path) -> None:
+    images_dir = root / "CellPoseSegment" / "images"
+    for fov_id in FOV_POSITIONS:
+        tifffile.imwrite(images_dir / f"segmented_mask{fov_id}.tif", _make_mask_stack())
+
+
+def build_synthetic_dataset(root: Path, *, with_masks: bool = False) -> dict:
     """Create the dataset tree under `root`. Returns expected-world-coordinate info for assertions."""
     root.mkdir(parents=True, exist_ok=True)
     images_dir = root / "CellPoseSegment" / "images"
@@ -73,6 +93,8 @@ def build_synthetic_dataset(root: Path) -> dict:
         membrane = _make_marker_stack(fov_id) * 0.5
         tifffile.imwrite(images_dir / f"raw_nuclear_images{fov_id}.tif", nucleus)
         tifffile.imwrite(images_dir / f"raw_membrane_images{fov_id}.tif", membrane)
+    if with_masks:
+        write_synthetic_masks(root)
 
     (root / "codebook_0_synthetic.csv").write_text(CODEBOOK_0_CSV)
     (root / "codebook_1_synthetic.csv").write_text(CODEBOOK_1_CSV)
@@ -99,21 +121,26 @@ def build_synthetic_dataset(root: Path) -> dict:
     microscope = MicroscopeTransformParameters(
         flip_horizontal=True, flip_vertical=False, transpose=False, pixel_size_um=PIXEL_SIZE_UM
     )
-    expected_marker_world = {}
-    for fov_id, (ox, oy) in FOV_POSITIONS.items():
+    def world_of(row: int, col: int, ox: float, oy: float) -> tuple[float, float]:
         x_um, y_um, _ = local_pixel_to_world_um(
-            MARKER_ROW,
-            MARKER_COL,
+            row,
+            col,
             fov_origin_x_um=ox,
             fov_origin_y_um=oy,
             image_height=IMAGE_HEIGHT,
             image_width=IMAGE_WIDTH,
             microscope=microscope,
         )
-        expected_marker_world[fov_id] = (x_um, y_um)
+        return x_um, y_um
+
+    expected_marker_world = {fov_id: world_of(MARKER_ROW, MARKER_COL, ox, oy) for fov_id, (ox, oy) in FOV_POSITIONS.items()}
+    expected_cell_interior_world = {
+        fov_id: world_of(*CELL_INTERIOR_PIXEL, ox, oy) for fov_id, (ox, oy) in FOV_POSITIONS.items()
+    }
 
     return {
         "expected_marker_world_um": expected_marker_world,
+        "expected_cell_interior_world_um": expected_cell_interior_world,
         "image_height": IMAGE_HEIGHT,
         "image_width": IMAGE_WIDTH,
         "pixel_size_um": PIXEL_SIZE_UM,

@@ -71,6 +71,24 @@ def test_save_preserves_unrelated_top_level_keys(tmp_path):
     assert on_disk["point_size"] == 9.0
 
 
+def test_gene_colors_keys_are_coerced_to_int_on_load(tmp_path):
+    """JSON object keys are always strings; `gene_colors` is keyed by the
+    integer gene_id everywhere in the app, so a raw string key loaded from
+    disk must become an int key, not coexist alongside one (a later
+    int-keyed write for the same gene would otherwise silently add a
+    duplicate entry instead of replacing the stale one)."""
+    settings_path = tmp_path / "settings.json"
+    settings_path.write_text(json.dumps({"gene_colors": {"123": "#abcdef"}}))
+
+    state = ViewerState.load_or_default(
+        settings_path, dataset_id="ds", cache_path=tmp_path, gene_ids_by_codebook={"CB0": [123]}
+    )
+
+    assert state.gene_colors == {123: "#abcdef"}
+    state.gene_colors[123] = "#111111"
+    assert state.gene_colors == {123: "#111111"}
+
+
 def test_missing_codebook_gets_no_default_gene_ids_until_app_reconciles(tmp_path):
     """load_or_default alone only seeds what it's given; MerfishViewerXPApp
     is responsible for filling in gaps for a codebook added since the last save."""

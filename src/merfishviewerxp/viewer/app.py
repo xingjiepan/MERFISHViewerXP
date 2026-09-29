@@ -13,6 +13,7 @@ from qtpy.QtWidgets import QToolTip
 
 from ..config import AppConfig
 from ..indexed_dataset import IndexedDataset
+from ..model.genes import hex_to_rgb
 from . import layers as layer_builders
 from .state import ViewerState
 from .widgets.gene_panel import AVAILABLE_SYMBOLS
@@ -61,12 +62,14 @@ class MerfishViewerXPApp:
             self.state.codebook_visible[codebook_id] = False
 
         self.image_layers: dict[str, napari.layers.Image] = {}
+        self.cell_boundary_layer: napari.layers.Image | None = None
         self.transcript_layers: dict[str, napari.layers.Points] = {}
         self._applying_query_result = False
         self._pending_query_result: tuple[object, dict] | None = None
         self._last_hover_gene: str | None = None
 
         self._build_image_layers()
+        self._build_cell_boundary_layer()
         self._build_fov_layers()
         self._build_transcript_layers()
 
@@ -92,6 +95,7 @@ class MerfishViewerXPApp:
             },
             initial_symbols_by_codebook=dict(self.state.codebook_symbols),
             initial_visible_by_codebook=dict(self.state.codebook_visible),
+            initial_gene_colors_by_id=dict(self.state.gene_colors),
             initial_point_size=self.state.point_size,
             initial_point_opacity=self.state.point_opacity,
             initial_include_blanks=self.state.include_blanks,
@@ -99,6 +103,9 @@ class MerfishViewerXPApp:
             initial_transcripts_visible=self.state.transcripts_visible,
             max_fov_id=int(indexed.fovs()["fov_id"].max()) if len(indexed.fovs()) else 0,
             callbacks=self._build_callbacks(),
+            cell_boundaries_available=self.cell_boundary_layer is not None,
+            initial_show_cell_boundaries=self.state.show_cell_boundaries,
+            initial_cell_boundary_opacity=self.state.cell_boundary_opacity,
         )
         self.viewer.window.add_dock_widget(self.dock_widget, area="right", name="MERFISHViewerXP")
 
@@ -121,6 +128,16 @@ class MerfishViewerXPApp:
             kwargs["opacity"] = self.state.image_opacity.get(channel_id, 1.0)
             layer = self.viewer.add_image(**kwargs)
             self.image_layers[channel_id] = layer
+
+    def _build_cell_boundary_layer(self) -> None:
+        if not self.indexed.has_cell_boundaries():
+            return
+        kwargs = layer_builders.cell_boundary_layer_kwargs(
+            self.indexed, z_mode=self.state.z_mode, z_index=self.state.z_index, z_range=self.state.z_range
+        )
+        kwargs["visible"] = self.state.show_cell_boundaries
+        kwargs["opacity"] = self.state.cell_boundary_opacity
+        self.cell_boundary_layer = self.viewer.add_image(**kwargs)
 
     def _build_fov_layers(self) -> None:
         polygons, labels, centers = layer_builders.fov_boundary_polygons(self.indexed)
@@ -207,7 +224,9 @@ class MerfishViewerXPApp:
     def _apply_query_result(self, table, lod_info: dict) -> None:
         per_codebook = layer_builders.split_table_by_codebook(table, list(self.transcript_layers.keys()))
         for codebook_id, sub_table in per_codebook.items():
-            coords, colors, features = layer_builders.spot_table_to_points(sub_table)
+            coords, colors, features = layer_builders.spot_table_to_points(
+                sub_table, color_overrides=self.state.gene_colors
+            )
             layer_builders.apply_points_update(
                 self.transcript_layers[codebook_id],
                 coords=coords,
@@ -296,9 +315,12 @@ class MerfishViewerXPApp:
             "on_display_mode_changed": self._on_display_mode_changed,
             "on_gene_selection_changed": self._on_gene_selection_changed,
             "on_codebook_symbol_changed": self._on_codebook_symbol_changed,
+            "on_gene_color_changed": self._on_gene_color_changed,
             "on_codebook_visible_changed": self._on_codebook_visible_changed,
             "on_show_fov_boundaries_changed": self._on_show_fov_boundaries_changed,
             "on_show_fov_ids_changed": self._on_show_fov_ids_changed,
+            "on_cell_boundaries_visible_changed": self._on_cell_boundaries_visible_changed,
+            "on_cell_boundary_opacity_changed": self._on_cell_boundary_opacity_changed,
             "on_jump_to_fov": self._on_jump_to_fov,
             "on_jump_to_xy": self._on_jump_to_xy,
         }
@@ -333,6 +355,10 @@ class MerfishViewerXPApp:
                 z_range=self.state.z_range,
             )
             layer.data = data
+        if self.cell_boundary_layer is not None:
+            self.cell_boundary_layer.data = layer_builders.cell_boundary_data(
+                self.indexed, z_mode=self.state.z_mode, z_index=self.state.z_index, z_range=self.state.z_range
+            )
 
     def _on_z_mode_changed(self, mode: str) -> None:
         self.state.z_mode = mode
@@ -386,6 +412,25 @@ class MerfishViewerXPApp:
         self.transcript_layers[codebook_id].symbol = symbol
         self.state.save(self.indexed.cache.settings_path)
 
+    def _on_gene_color_changed(self, gene_id: int, color_hex: str) -> None:
+        # Gene identity (and its default color) is global -- not scoped to a
+        # single codebook -- so a chosen override is recolored everywhere
+        # that gene currently has points loaded, not just in the panel/layer
+        # the user happened to change it from.
+        self.state.gene_colors[gene_id] = color_hex
+        self.state.save(self.indexed.cache.settings_path)
+        rgba = (*hex_to_rgb(color_hex), 1.0)
+        for layer in self.transcript_layers.values():
+            gene_ids = layer.features.get("gene_id")
+            if gene_ids is None or len(gene_ids) == 0:
+                continue
+            mask = np.asarray(gene_ids) == gene_id
+            if not mask.any():
+                continue
+            colors = np.array(layer.face_color, dtype=float)
+            colors[mask] = rgba
+            layer.face_color = colors
+
     def _on_codebook_visible_changed(self, codebook_id: str, visible: bool) -> None:
         self.state.codebook_visible[codebook_id] = visible
         self.transcript_layers[codebook_id].visible = visible
@@ -403,6 +448,19 @@ class MerfishViewerXPApp:
     def _on_show_fov_ids_changed(self, visible: bool) -> None:
         self.state.show_fov_ids = visible
         self.fov_labels_layer.visible = visible
+
+    def _on_cell_boundaries_visible_changed(self, visible: bool) -> None:
+        if self.cell_boundary_layer is None:
+            return
+        self.state.show_cell_boundaries = visible
+        self.cell_boundary_layer.visible = visible
+        self.state.save(self.indexed.cache.settings_path)
+
+    def _on_cell_boundary_opacity_changed(self, opacity: float) -> None:
+        if self.cell_boundary_layer is None:
+            return
+        self.state.cell_boundary_opacity = opacity
+        self.cell_boundary_layer.opacity = opacity
 
     def _on_jump_to_fov(self, fov_id: int) -> None:
         fovs = self.indexed.fovs()

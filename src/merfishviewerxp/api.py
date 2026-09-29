@@ -22,8 +22,10 @@ class MerfishDataset:
         self.descriptor = descriptor
 
     @classmethod
-    def open(cls, path: Path, *, channel_patterns: dict[str, str] | None = None) -> MerfishDataset:
-        adapter = MerlinDatasetAdapter(Path(path), channel_patterns=channel_patterns)
+    def open(
+        cls, path: Path, *, channel_patterns: dict[str, str] | None = None, mask_pattern: str | None = None
+    ) -> MerfishDataset:
+        adapter = MerlinDatasetAdapter(Path(path), channel_patterns=channel_patterns, mask_pattern=mask_pattern)
         return cls(adapter.discover())
 
     def validate(self) -> ValidationReport:

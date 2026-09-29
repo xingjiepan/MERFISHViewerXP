@@ -3,8 +3,10 @@
 Filenames under ``CellPoseSegment/images`` vary across MERlin runs, so
 discovery is pattern-based and configurable (spec section 5). Exact
 filenames observed in practice: ``raw_nuclear_images<fov>.tif``,
-``raw_membrane_images<fov>.tif`` (plus ``segmented_mask<fov>.tif``, which is
-a cell-segmentation product out of MVP scope, not a stain channel).
+``raw_membrane_images<fov>.tif``, and ``segmented_mask<fov>.tif``. The
+segmentation mask is a per-FOV cell label image, not a stain channel, so it
+is discovered separately (:func:`discover_fov_masks`) and never enters the
+intensity mosaic.
 
 Whether the ``microscope_parameters.json`` flip/transpose flags must be
 reapplied to these already-exported per-FOV arrays is resolved empirically
@@ -34,6 +36,28 @@ DEFAULT_CHANNEL_PATTERNS: dict[str, str] = {
     "nucleus": r"^raw_nuclear_images(?P<fov>\d+)\.tiff?$",
     "membrane": r"^raw_membrane_images(?P<fov>\d+)\.tiff?$",
 }
+
+DEFAULT_MASK_PATTERN = r"^segmented_mask(?P<fov>\d+)\.tiff?$"
+
+
+def discover_fov_masks(images_dir: Path, mask_pattern: str | None = None) -> dict[int, Path]:
+    """Return ``{fov_id: path}`` for per-FOV segmentation label masks under ``images_dir``.
+
+    Masks are optional: a dataset without any returns an empty dict.
+    """
+    if not images_dir.is_dir():
+        return {}
+    pattern = re.compile(mask_pattern or DEFAULT_MASK_PATTERN, re.IGNORECASE)
+    result: dict[int, Path] = {}
+    for entry in sorted(images_dir.iterdir()):
+        if not entry.is_file():
+            continue
+        match = pattern.match(entry.name)
+        if match:
+            result[int(match.group("fov"))] = entry
+    if result:
+        logger.info("Discovered segmentation masks for %d FOVs under %s", len(result), images_dir)
+    return result
 
 
 def discover_fov_images(

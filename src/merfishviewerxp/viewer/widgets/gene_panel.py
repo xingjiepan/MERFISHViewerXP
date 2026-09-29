@@ -8,6 +8,7 @@ from qtpy.QtGui import QColor, QIcon, QPixmap
 from qtpy.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QGroupBox,
     QHBoxLayout,
@@ -20,6 +21,7 @@ from qtpy.QtWidgets import (
 )
 
 GENE_ID_ROLE = Qt.ItemDataRole.UserRole
+COLOR_ROLE = Qt.ItemDataRole.UserRole + 1
 
 # napari's supported Points symbols (napari.layers.points._points_constants.Symbol)
 AVAILABLE_SYMBOLS = [
@@ -62,14 +64,17 @@ class GenePanel(QGroupBox):
         initial_active_gene_ids: set[int],
         initial_symbol: str,
         initial_visible: bool,
+        initial_gene_colors: dict[int, str] | None = None,
         on_selection_changed: Callable[[str, set[int]], None],
         on_symbol_changed: Callable[[str, str], None],
         on_visible_changed: Callable[[str, bool], None],
+        on_color_changed: Callable[[int, str], None],
         parent=None,
     ) -> None:
         super().__init__(f"Codebook {codebook_id}", parent)
         self.codebook_id = codebook_id
         self._on_selection_changed = on_selection_changed
+        self._on_color_changed = on_color_changed
         self._suspend_signal = False
 
         layout = QVBoxLayout()
@@ -96,14 +101,19 @@ class GenePanel(QGroupBox):
         self.list_widget = QListWidget()
         self.list_widget.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.list_widget.itemChanged.connect(self._handle_item_changed)
+        self.list_widget.itemDoubleClicked.connect(self._handle_item_double_clicked)
+        gene_colors = initial_gene_colors or {}
         for row in genes.itertuples(index=False):
             label = f"{row.gene_name} ({row.spot_count})"
-            item = QListWidgetItem(_swatch_icon(row.color_hex), label)
+            color_hex = gene_colors.get(int(row.gene_id), row.color_hex)
+            item = QListWidgetItem(_swatch_icon(color_hex), label)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             item.setCheckState(
                 Qt.CheckState.Checked if int(row.gene_id) in initial_active_gene_ids else Qt.CheckState.Unchecked
             )
             item.setData(GENE_ID_ROLE, int(row.gene_id))
+            item.setData(COLOR_ROLE, color_hex)
+            item.setToolTip("Double-click to change this gene's color")
             self.list_widget.addItem(item)
         layout.addWidget(self.list_widget)
 
@@ -143,6 +153,17 @@ class GenePanel(QGroupBox):
     def _handle_item_changed(self, _item) -> None:
         if not self._suspend_signal:
             self._on_selection_changed(self.codebook_id, self.active_gene_ids())
+
+    def _handle_item_double_clicked(self, item: QListWidgetItem) -> None:
+        gene_id = item.data(GENE_ID_ROLE)
+        current_hex = item.data(COLOR_ROLE)
+        color = QColorDialog.getColor(QColor(current_hex), self, "Choose gene color")
+        if not color.isValid():
+            return
+        new_hex = color.name()
+        item.setIcon(_swatch_icon(new_hex))
+        item.setData(COLOR_ROLE, new_hex)
+        self._on_color_changed(gene_id, new_hex)
 
     def _bulk_set(self, checked: bool) -> None:
         self._suspend_signal = True

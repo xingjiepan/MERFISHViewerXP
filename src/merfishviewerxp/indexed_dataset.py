@@ -17,6 +17,7 @@ import zarr
 
 from .errors import MerfishViewerXPError
 from .indexing.manifest import Manifest, load_manifest
+from .indexing.segmentation import BOUNDARY_ARRAY_NAME
 from .model.spots import DEFAULT_SPATIAL_TILE_SIZE_UM, MAX_VISIBLE_POINTS_DEFAULT
 from .model.transforms import MicroscopeTransformParameters
 from .query.lod import apply_lod
@@ -37,6 +38,7 @@ class IndexedDataset:
         self._genes_df: pd.DataFrame | None = None
         self._fovs_df: pd.DataFrame | None = None
         self._mosaic_metadata: dict | None = None
+        self._segmentation_metadata: dict | None = None
 
     @classmethod
     def open(cls, cache_dir: Path) -> IndexedDataset:
@@ -124,10 +126,33 @@ class IndexedDataset:
                 f"No image mosaic cached for channel {channel_id!r} under {channel_dir}.\n"
                 f"Available channels: {self.channels()}."
             )
-        levels = sorted(
-            (p for p in channel_dir.iterdir() if p.is_dir() and p.name.isdigit()),
-            key=lambda p: int(p.name),
-        )
-        if not levels:
-            raise MerfishViewerXPError(f"No pyramid levels found under {channel_dir}.")
-        return [zarr.open_array(str(p), mode="r") for p in levels]
+        return _open_pyramid_levels(channel_dir)
+
+    def has_cell_boundaries(self) -> bool:
+        return bool(self.manifest.components_built.get("segmentation")) and self.cache.segmentation_metadata_path.is_file()
+
+    def cell_boundary_metadata(self) -> dict:
+        """Mosaic geometry of the cell-boundary overlay (same keys as `mosaic_metadata()` entries)."""
+        if self._segmentation_metadata is None:
+            self._segmentation_metadata = json.loads(self.cache.segmentation_metadata_path.read_text())
+        return self._segmentation_metadata[BOUNDARY_ARRAY_NAME]
+
+    def cell_boundary_pyramid(self) -> list[zarr.Array]:
+        """uint8 (z, y, x) pyramid levels: 1 on segmented cell boundaries, 0 elsewhere."""
+        if not self.has_cell_boundaries():
+            raise MerfishViewerXPError(
+                f"No cell-boundary cache under {self.cache.segmentation_dir}.\n"
+                "Segmentation masks (CellPoseSegment/images/segmented_mask<fov>.tif) were not found "
+                "or not indexed; run `merfishviewerxp index <experiment>`."
+            )
+        return _open_pyramid_levels(self.cache.segmentation_dir / BOUNDARY_ARRAY_NAME)
+
+
+def _open_pyramid_levels(pyramid_dir: Path) -> list[zarr.Array]:
+    levels = sorted(
+        (p for p in pyramid_dir.iterdir() if p.is_dir() and p.name.isdigit()),
+        key=lambda p: int(p.name),
+    )
+    if not levels:
+        raise MerfishViewerXPError(f"No pyramid levels found under {pyramid_dir}.")
+    return [zarr.open_array(str(p), mode="r") for p in levels]

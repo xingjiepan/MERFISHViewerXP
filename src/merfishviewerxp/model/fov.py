@@ -22,3 +22,6 @@ class FOVDescriptor:
     image_paths: dict[str, Path] = field(default_factory=dict)
     image_shape_zyx: tuple[int, int, int] | None = None
     image_dtype: str | None = None
+    # Cell segmentation label image for this FOV, if any. Expected to share
+    # the stain images' (z, y, x) shape and orientation.
+    mask_path: Path | None = None

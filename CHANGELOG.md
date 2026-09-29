@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Cell segmentation boundaries: `segmented_mask<fov>.tif` label masks under
+  `CellPoseSegment/images` are turned into a multiscale boundary overlay
+  (`segmentation.zarr/`, max-downsampled so thin lines survive zooming out),
+  aligned with the stain mosaic and following its z mode. New "Cell
+  boundaries" controls in the Images panel (visibility, opacity; persisted).
+- Segmentation is its own cache component with its own fingerprint: adding,
+  changing, or removing masks rebuilds only the boundaries. Existing caches
+  and manifests stay valid.
+- CLI: `--no-segmentation` for `index` and `view`.
+- Tests: exit the pytest process with its own status once reporting is done
+  when Qt was loaded, avoiding an intermittent PyQt6 segfault in its
+  interpreter-exit cleanup after all tests have passed.
+
 ## v0.1.0
 
 Initial MVP implementation per `MERFISHViewerXP_SPEC.md`.

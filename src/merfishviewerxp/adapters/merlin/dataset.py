@@ -42,11 +42,13 @@ class MerlinDatasetAdapter:
         *,
         images_subdir: str = DEFAULT_IMAGES_SUBDIR,
         channel_patterns: dict[str, str] | None = None,
+        mask_pattern: str | None = None,
         orientation_sample_size: int = 2000,
     ) -> None:
         self.root_path = Path(root_path)
         self.images_subdir = images_subdir
         self.channel_patterns = channel_patterns
+        self.mask_pattern = mask_pattern
         self.orientation_sample_size = orientation_sample_size
 
     def discover(self) -> DatasetDescriptor:
@@ -61,6 +63,7 @@ class MerlinDatasetAdapter:
         pos_df = positions_mod.load_positions(positions_file)
         microscope = microscope_mod.load_microscope_parameters(microscope_file)
         image_map = images_mod.discover_fov_images(images_dir, self.channel_patterns)
+        mask_map = images_mod.discover_fov_masks(images_dir, self.mask_pattern)
 
         channel_ids = sorted({ch for chans in image_map.values() for ch in chans})
         channels = [ChannelDescriptor(channel_id=c, display_name=c.capitalize()) for c in channel_ids]
@@ -80,6 +83,8 @@ class MerlinDatasetAdapter:
                     image_paths=paths,
                     image_shape_zyx=shape,
                     image_dtype=dtype,
+                    # A mask can only be placed via its FOV's stain-image geometry.
+                    mask_path=mask_map.get(int(fov_id)) if paths else None,
                 )
             )
 

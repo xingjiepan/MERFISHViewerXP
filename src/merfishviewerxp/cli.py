@@ -50,6 +50,9 @@ def index(
     no_image_pyramid: bool = typer.Option(False, "--no-image-pyramid"),
     no_transcripts: bool = typer.Option(False, "--no-transcripts"),
     no_images: bool = typer.Option(False, "--no-images"),
+    no_segmentation: bool = typer.Option(
+        False, "--no-segmentation", help="Skip building cell boundaries from segmentation masks."
+    ),
 ) -> None:
     """Build or refresh the on-disk cache without opening the viewer."""
     configure_logging()
@@ -77,6 +80,7 @@ def index(
             build_images=not no_images,
             build_transcripts=not no_transcripts,
             build_pyramid_levels=not no_image_pyramid,
+            build_segmentation=not no_segmentation,
         )
         resolved_cache_dir = CacheManager(dataset_root=experiment, cache_dir=cache_dir).cache_dir
         typer.echo(f"Cache ready at {resolved_cache_dir}")
@@ -90,6 +94,9 @@ def index(
 def view(
     experiment: Path = typer.Argument(..., exists=True, file_okay=False),
     cache_dir: Path | None = typer.Option(None, "--cache-dir"),
+    no_segmentation: bool = typer.Option(
+        False, "--no-segmentation", help="Skip building cell boundaries from segmentation masks."
+    ),
 ) -> None:
     """Validate, build any missing/stale cache, then open the interactive viewer."""
     configure_logging()
@@ -103,7 +110,7 @@ def view(
             raise typer.Exit(code=1)
 
         config = load_config(dataset_root=experiment, cache_dir=cache_dir)
-        index_dataset(dataset, cache_dir=cache_dir, config=config)
+        index_dataset(dataset, cache_dir=cache_dir, config=config, build_segmentation=not no_segmentation)
 
         from .indexed_dataset import IndexedDataset
         from .viewer.app import launch_viewer

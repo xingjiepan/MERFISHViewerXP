@@ -2,6 +2,7 @@ from merfishviewerxp.model.genes import (
     deterministic_gene_id,
     gene_color_hex,
     gene_color_rgb,
+    hex_to_rgb,
     is_blank_name,
 )
 
@@ -40,3 +41,15 @@ def test_different_genes_usually_differ_in_color():
     names = [f"GENE{i}" for i in range(50)]
     colors = {gene_color_hex(n) for n in names}
     assert len(colors) > 40  # allow rare collisions, but expect mostly distinct
+
+
+def test_hex_to_rgb_round_trips_gene_color_hex():
+    for name in ["PDGFRA", "SOMEGENE", "Blank-1"]:
+        h = gene_color_hex(name)
+        r, g, b = hex_to_rgb(h)
+        assert (round(r, 2), round(g, 2), round(b, 2)) == tuple(round(c, 2) for c in gene_color_rgb(name))
+
+
+def test_hex_to_rgb_known_values():
+    assert hex_to_rgb("#ff0000") == (1.0, 0.0, 0.0)
+    assert hex_to_rgb("00ff00") == (0.0, 1.0, 0.0)  # leading '#' is optional

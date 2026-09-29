@@ -60,6 +60,33 @@ class ChannelControls(QGroupBox):
         self.setLayout(layout)
 
 
+class CellBoundaryControls(QGroupBox):
+    def __init__(
+        self,
+        *,
+        initial_visible: bool,
+        initial_opacity: float,
+        on_visible_changed: Callable[[bool], None],
+        on_opacity_changed: Callable[[float], None],
+        parent=None,
+    ) -> None:
+        super().__init__("Cell boundaries", parent)
+        layout = QFormLayout()
+
+        self.visible_checkbox = QCheckBox("Show segmentation boundaries")
+        self.visible_checkbox.setChecked(initial_visible)
+        self.visible_checkbox.toggled.connect(on_visible_changed)
+        layout.addRow(self.visible_checkbox)
+
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.opacity_slider.setRange(0, 100)
+        self.opacity_slider.setValue(int(initial_opacity * 100))
+        self.opacity_slider.valueChanged.connect(lambda v: on_opacity_changed(v / 100.0))
+        layout.addRow("Opacity", self.opacity_slider)
+
+        self.setLayout(layout)
+
+
 class ImagePanel(QGroupBox):
     def __init__(
         self,
@@ -72,6 +99,11 @@ class ImagePanel(QGroupBox):
         on_z_mode_changed: Callable[[str], None],
         on_z_index_changed: Callable[[int], None],
         on_z_range_changed: Callable[[int, int], None],
+        cell_boundaries_available: bool = False,
+        initial_show_cell_boundaries: bool = False,
+        initial_cell_boundary_opacity: float = 1.0,
+        on_cell_boundaries_visible_changed: Callable[[bool], None] | None = None,
+        on_cell_boundary_opacity_changed: Callable[[float], None] | None = None,
         parent=None,
     ) -> None:
         super().__init__("Images", parent)
@@ -89,6 +121,16 @@ class ImagePanel(QGroupBox):
             )
             self.channel_controls[channel_id] = ctrl
             layout.addWidget(ctrl)
+
+        self.cell_boundary_controls: CellBoundaryControls | None = None
+        if cell_boundaries_available:
+            self.cell_boundary_controls = CellBoundaryControls(
+                initial_visible=initial_show_cell_boundaries,
+                initial_opacity=initial_cell_boundary_opacity,
+                on_visible_changed=on_cell_boundaries_visible_changed or (lambda _v: None),
+                on_opacity_changed=on_cell_boundary_opacity_changed or (lambda _v: None),
+            )
+            layout.addWidget(self.cell_boundary_controls)
 
         z_widget = QWidget()
         z_form = QFormLayout()

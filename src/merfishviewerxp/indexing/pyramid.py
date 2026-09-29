@@ -13,8 +13,11 @@ from ..storage.zarr_store import create_array
 logger = logging.getLogger(__name__)
 
 
-def _downsample_block(block: np.ndarray, factor: int) -> np.ndarray:
-    """Area/mean downsample a (z, y, x) block by `factor` in y and x."""
+REDUCTIONS = ("mean", "max")
+
+
+def _downsample_block(block: np.ndarray, factor: int, reduction: str = "mean") -> np.ndarray:
+    """Downsample a (z, y, x) block by `factor` in y and x (area mean, or max)."""
     _z, h, w = block.shape
     pad_h = (-h) % factor
     pad_w = (-w) % factor
@@ -22,6 +25,8 @@ def _downsample_block(block: np.ndarray, factor: int) -> np.ndarray:
         block = np.pad(block, ((0, 0), (0, pad_h), (0, pad_w)), mode="edge")
     zz, bh, bw = block.shape
     reshaped = block.reshape(zz, bh // factor, factor, bw // factor, factor)
+    if reduction == "max":
+        return reshaped.max(axis=(2, 4))
     return reshaped.mean(axis=(2, 4))
 
 
@@ -34,6 +39,7 @@ def build_pyramid(
     min_dim_px: int = 1024,
     max_levels: int = 12,
     active_chunks: set[tuple[int, int]] | None = None,
+    reduction: str = "mean",
 ) -> list[int]:
     """Create levels 1..N under ``out_dir`` from the level-0 array. Returns level indices created.
 
@@ -42,7 +48,13 @@ def build_pyramid(
     relative to their own size) skip empty regions at every level instead of
     scanning the full -- potentially mostly-empty -- bounding-box grid.
     Remapped level-to-level assuming a fixed chunk size and downsample_factor.
+
+    ``reduction`` is ``"mean"`` for fluorescence intensity (spec 8.7) or
+    ``"max"`` for binary overlays such as cell boundaries, where averaging
+    would fade 1-pixel lines away at coarser levels.
     """
+    if reduction not in REDUCTIONS:
+        raise ValueError(f"Unknown reduction {reduction!r}; expected one of {REDUCTIONS}")
     current = zarr.open_array(str(level0_path), mode="r")
     z, h, w = current.shape
     created: list[int] = []
@@ -79,7 +91,7 @@ def build_pyramid(
             src_row0, src_row1 = row0 * downsample_factor, min(row1 * downsample_factor, h)
             src_col0, src_col1 = col0 * downsample_factor, min(col1 * downsample_factor, w)
             block = current[:, src_row0:src_row1, src_col0:src_col1]
-            out_arr[:, row0:row1, col0:col1] = _downsample_block(block, downsample_factor).astype(current.dtype)
+            out_arr[:, row0:row1, col0:col1] = _downsample_block(block, downsample_factor, reduction).astype(current.dtype)
 
         created.append(level_idx)
         current = out_arr

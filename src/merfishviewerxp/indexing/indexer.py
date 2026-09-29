@@ -22,6 +22,7 @@ from ..storage.zarr_store import atomic_replace_dir
 from . import gene_index as gene_index_mod
 from . import image_mosaic
 from . import pyramid as pyramid_mod
+from . import segmentation as segmentation_mod
 from . import spot_index as spot_index_mod
 from .manifest import (
     InvalidationDecision,
@@ -90,6 +91,54 @@ def _write_fov_table(dataset: DatasetDescriptor, path: Path) -> None:
     write_table(table, path)
 
 
+def _build_segmentation(
+    dataset: DatasetDescriptor,
+    *,
+    cache: CacheManager,
+    config: AppConfig,
+    build_pyramid_levels: bool,
+    report: Callable[[str, str], None],
+) -> None:
+    if not any(fov.mask_path is not None for fov in dataset.fovs):
+        if cache.segmentation_dir.exists():
+            shutil.rmtree(cache.segmentation_dir)
+            report("segmentation", "no segmentation masks found; removed stale cell-boundary cache")
+        return
+
+    report("segmentation", "building cell-boundary mosaic from segmentation masks")
+    tmp_seg = cache.tmp_dir / "segmentation.zarr"
+    level0_path = tmp_seg / segmentation_mod.BOUNDARY_ARRAY_NAME / "0"
+
+    def seg_progress(done: int, total: int) -> None:
+        if done % 50 == 0 or done == total:
+            report("segmentation", f"{done}/{total} FOV masks placed")
+
+    geometry, touched_chunks, n_placed = segmentation_mod.build_boundary_mosaic(
+        dataset, level0_out_path=level0_path, chunk_size=config.images.chunk_size, progress_callback=seg_progress
+    )
+    if build_pyramid_levels:
+        report("segmentation", "building cell-boundary pyramid")
+        pyramid_mod.build_pyramid(
+            level0_path,
+            tmp_seg / segmentation_mod.BOUNDARY_ARRAY_NAME,
+            chunk_size=config.images.chunk_size,
+            active_chunks=touched_chunks,
+            reduction="max",
+        )
+    metadata = {
+        segmentation_mod.BOUNDARY_ARRAY_NAME: {
+            "origin_world_um": [geometry.origin_x_um, geometry.origin_y_um],
+            "pixel_size_um": [geometry.pixel_size_um, geometry.pixel_size_um],
+            "shape_yx": [geometry.height_px, geometry.width_px],
+            "z_count": geometry.z_count,
+            "n_fovs": n_placed,
+        }
+    }
+    (tmp_seg / "mosaic_metadata.json").write_text(json.dumps(metadata, indent=2))
+    atomic_replace_dir(tmp_seg, cache.segmentation_dir)
+    report("segmentation", "done")
+
+
 def index_dataset(
     dataset: DatasetDescriptor,
     *,
@@ -99,6 +148,7 @@ def index_dataset(
     build_images: bool = True,
     build_transcripts: bool = True,
     build_pyramid_levels: bool = True,
+    build_segmentation: bool = True,
     progress_callback: Callable[[str, str], None] | None = None,
 ) -> Manifest:
     """Build or refresh the on-disk cache. Returns the resulting manifest.
@@ -116,13 +166,16 @@ def index_dataset(
     old_manifest = None if force else load_manifest(cache.cache_dir)
     current_fp = compute_source_fingerprint(dataset)
     decision = (
-        InvalidationDecision(rebuild_images=True, rebuild_spots=True, rebuild_genes=True, reasons=["--force"])
+        InvalidationDecision(
+            rebuild_images=True, rebuild_spots=True, rebuild_genes=True, rebuild_segmentation=True, reasons=["--force"]
+        )
         if force
         else decide_invalidation(old_manifest, current_fp)
     )
 
     report("plan", f"reasons={decision.reasons} rebuild_images={decision.rebuild_images} "
-                   f"rebuild_spots={decision.rebuild_spots} rebuild_genes={decision.rebuild_genes}")
+                   f"rebuild_spots={decision.rebuild_spots} rebuild_genes={decision.rebuild_genes} "
+                   f"rebuild_segmentation={decision.rebuild_segmentation}")
 
     if not decision.rebuild_anything and old_manifest is not None:
         report("cache", "cache is valid; nothing to rebuild")
@@ -133,7 +186,11 @@ def index_dataset(
         shutil.rmtree(cache.tmp_dir)
     cache.tmp_dir.mkdir(parents=True)
 
-    components_built = dict(old_manifest.components_built) if old_manifest else {"images": False, "spots": False, "genes": False}
+    components_built = (
+        dict(old_manifest.components_built)
+        if old_manifest
+        else {"images": False, "spots": False, "genes": False, "segmentation": False}
+    )
 
     parsed_codebooks = None
     if decision.rebuild_spots or decision.rebuild_genes:
@@ -211,6 +268,10 @@ def index_dataset(
         atomic_replace_dir(tmp_images, cache.images_dir)
         components_built["images"] = True
         report("images", "done")
+
+    if build_segmentation and decision.rebuild_segmentation:
+        _build_segmentation(dataset, cache=cache, config=config, build_pyramid_levels=build_pyramid_levels, report=report)
+        components_built["segmentation"] = cache.segmentation_dir.is_dir()
 
     _write_fov_table(dataset, cache.fovs_path)
     save_dataset_json(dataset, cache.dataset_json_path)
